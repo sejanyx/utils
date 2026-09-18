@@ -1,32 +1,29 @@
 ﻿
 
-[CmdletBinding()]
-param(
-    [string]$TailscaleAuthKey,
-    [string]$TailscaleHostname,
-    [string[]]$WallpaperUrls = @(
-        'https://raw.githubusercontent.com/sejanyx/utils/refs/heads/main/a.png',
-        'https://raw.githubusercontent.com/sejanyx/utils/refs/heads/main/b.png',
-        'https://raw.githubusercontent.com/sejanyx/utils/refs/heads/main/c.png',
-        'https://raw.githubusercontent.com/sejanyx/utils/refs/heads/main/d.png',
-        'https://raw.githubusercontent.com/sejanyx/utils/refs/heads/main/f.png',
-        'https://raw.githubusercontent.com/sejanyx/utils/refs/heads/main/g.png',
-        'https://raw.githubusercontent.com/sejanyx/utils/refs/heads/main/h.png'
-    ),
-    [switch]$SkipTailscaleEnrollment,
-    [switch]$SkipRestart
+$WallpaperUrls = @(
+    'https://raw.githubusercontent.com/sejanyx/utils/refs/heads/main/a.png',
+    'https://raw.githubusercontent.com/sejanyx/utils/refs/heads/main/b.png',
+    'https://raw.githubusercontent.com/sejanyx/utils/refs/heads/main/c.png',
+    'https://raw.githubusercontent.com/sejanyx/utils/refs/heads/main/d.png',
+    'https://raw.githubusercontent.com/sejanyx/utils/refs/heads/main/f.png',
+    'https://raw.githubusercontent.com/sejanyx/utils/refs/heads/main/g.png',
+    'https://raw.githubusercontent.com/sejanyx/utils/refs/heads/main/h.png'
 )
+$SkipTailscaleEnrollment = $false
+$SkipRestart = $false
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$Version = '0.4.1-standalone'
+$Version = '0.4.2-standalone'
 $LocalUserName = 'nyx'
 $LocalUserPassword = 'nyxcloud'
 $ApolloDisplayName = 'nyxcloud'
 $ApolloUsername = 'nyx'
 $ApolloPassword = 'nyxcloud'
+$script:TailscaleHostname = $null
+$script:TailscaleSecureKey = $null
 
 $NyxRoot = Join-Path $env:ProgramData 'Nyx'
 $LogRoot = Join-Path $NyxRoot 'Logs'
@@ -65,7 +62,7 @@ function Set-NyxState {
         computerName = $env:COMPUTERNAME
         localUser = $LocalUserName
         apolloDisplayName = $ApolloDisplayName
-        tailscaleHostname = $TailscaleHostname
+        tailscaleHostname = $script:TailscaleHostname
         updatedAt = (Get-Date).ToUniversalTime().ToString('o')
     } | ConvertTo-Json | Set-Content -LiteralPath $StatePath -Encoding UTF8
 }
@@ -90,9 +87,6 @@ function Assert-Environment {
         throw 'WinGet não foi encontrado. Instale/atualize o App Installer da Microsoft antes de executar este script.'
     }
 
-    if ($TailscaleHostname -and $TailscaleHostname -notmatch '^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$') {
-        throw 'TailscaleHostname inválido.'
-    }
 }
 
 function Ensure-NyxUser {
@@ -318,20 +312,29 @@ function Configure-Apollo {
     Write-NyxLog 'Apollo configurado como nyxcloud com credenciais nyx / nyxcloud.'
 }
 
+function Read-TailscaleEnrollmentInput {
+    do {
+        $hostnameInput = (Read-Host 'Tailscale hostname').Trim()
+        if (-not $hostnameInput) {
+            $hostnameInput = $env:COMPUTERNAME.ToLowerInvariant()
+        }
+        if ($hostnameInput -notmatch '^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$') {
+            Write-Host 'Hostname inválido. Use apenas letras, números e hífen.' -ForegroundColor Yellow
+            $hostnameInput = $null
+        }
+    } while (-not $hostnameInput)
+
+    $script:TailscaleHostname = $hostnameInput.ToLowerInvariant()
+    $script:TailscaleSecureKey = Read-Host 'Tailscale auth key' -AsSecureString
+    if ($script:TailscaleSecureKey.Length -eq 0) {
+        throw 'A auth key do Tailscale não pode ficar vazia.'
+    }
+}
+
 function Connect-Tailscale {
     if ($SkipTailscaleEnrollment) {
-        Write-NyxLog 'Registro do Tailscale ignorado por -SkipTailscaleEnrollment.' 'WARN'
+        Write-NyxLog 'Registro do Tailscale ignorado.' 'WARN'
         return
-    }
-
-    if (-not $TailscaleAuthKey) {
-        Write-NyxLog 'TailscaleAuthKey não informada; Tailscale foi instalado, mas não registrado.' 'WARN'
-        return
-    }
-
-    if (-not $TailscaleHostname) {
-        $script:TailscaleHostname = $env:COMPUTERNAME.ToLowerInvariant()
-        Write-NyxLog "TailscaleHostname não informado; usando $script:TailscaleHostname." 'WARN'
     }
 
     $tailscale = Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe'
@@ -347,21 +350,45 @@ function Connect-Tailscale {
             $registered = $status.BackendState -eq 'Running'
         }
     }
-    catch { $registered = $false }
+    catch {
+        $registered = $false
+    }
 
     if ($registered) {
-        & $tailscale set --hostname=$script:TailscaleHostname *> $null
+        & $tailscale set "--hostname=$script:TailscaleHostname" *> $null
         if ($LASTEXITCODE -ne 0) {
             throw 'Não foi possível atualizar o hostname do Tailscale.'
         }
+        $script:TailscaleSecureKey = $null
         Write-NyxLog 'Tailscale já estava registrado; hostname atualizado.'
         return
     }
 
-    & $tailscale up --auth-key=$TailscaleAuthKey --hostname=$script:TailscaleHostname --unattended=true --accept-routes=false *> $null
-    if ($LASTEXITCODE -ne 0) {
-        throw 'Falha ao registrar a máquina no Tailscale.'
+    if (-not $script:TailscaleSecureKey -or $script:TailscaleSecureKey.Length -eq 0) {
+        throw 'A auth key do Tailscale não foi informada.'
     }
+
+    $keyFile = Join-Path $env:TEMP ("nyx-ts-{0}.key" -f ([guid]::NewGuid().ToString('N')))
+    $bstr = [IntPtr]::Zero
+    try {
+        $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($script:TailscaleSecureKey)
+        $plainKey = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+        Set-Content -LiteralPath $keyFile -Value $plainKey -NoNewline -Encoding Ascii
+        Remove-Variable plainKey -ErrorAction SilentlyContinue
+
+        & $tailscale up "--auth-key=file:$keyFile" "--hostname=$script:TailscaleHostname" '--unattended=true' '--accept-routes=false' *> $null
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Falha ao registrar a máquina no Tailscale.'
+        }
+    }
+    finally {
+        if ($bstr -ne [IntPtr]::Zero) {
+            [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+        }
+        $script:TailscaleSecureKey = $null
+        Remove-Item -LiteralPath $keyFile -Force -ErrorAction SilentlyContinue
+    }
+
     Write-NyxLog 'Tailscale registrado e configurado em modo unattended.'
 }
 
@@ -522,6 +549,7 @@ try {
     Write-NyxLog "Nyx Cloud standalone $Version iniciado."
 
     Assert-Environment
+    Read-TailscaleEnrollmentInput
     Set-SystemBrandingAndLogon
     Ensure-NyxUser
     Download-Wallpapers
@@ -556,6 +584,7 @@ try {
     exit 0
 }
 catch {
+    $script:TailscaleSecureKey = $null
     $safeMessage = $_.Exception.Message -replace 'tskey-[A-Za-z0-9_-]+', '[REDACTED]'
     try { Set-NyxState -Status 'FAILED' -Detail $safeMessage } catch {}
     try { Write-NyxLog $safeMessage 'ERROR' } catch { Write-Error $safeMessage }
