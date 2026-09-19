@@ -1,4 +1,4 @@
-﻿
+
 
 $WallpaperUrls = @(
     'https://raw.githubusercontent.com/sejanyx/utils/refs/heads/main/a.png',
@@ -16,7 +16,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$Version = '0.4.2-standalone'
+$Version = '0.4.3-standalone'
 $LocalUserName = 'nyx'
 $LocalUserPassword = 'nyxcloud'
 $ApolloDisplayName = 'nyxcloud'
@@ -25,13 +25,45 @@ $ApolloPassword = 'nyxcloud'
 $script:TailscaleHostname = $null
 $script:TailscaleSecureKey = $null
 
-$NyxRoot = Join-Path $env:ProgramData 'Nyx'
-$LogRoot = Join-Path $NyxRoot 'Logs'
-$ToolRoot = Join-Path $NyxRoot 'Tools'
-$WallpaperRoot = Join-Path $NyxRoot 'Wallpapers'
-$UserStateRoot = Join-Path $NyxRoot 'UserState'
-$StatePath = Join-Path $NyxRoot 'provisioning-state.json'
-$LogPath = Join-Path $LogRoot 'provisioning.log'
+function Get-NyxRequiredValue {
+    param(
+        [Parameter(Mandatory)] [AllowNull()] [AllowEmptyString()] [string]$Value,
+        [Parameter(Mandatory)] [string]$Name
+    )
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        throw "Valor obrigatório ausente: $Name."
+    }
+    return $Value.Trim()
+}
+
+function Join-NyxPath {
+    param(
+        [Parameter(Mandatory)] [AllowNull()] [AllowEmptyString()] [string]$Base,
+        [Parameter(Mandatory)] [AllowNull()] [AllowEmptyString()] [string]$Child
+    )
+    $Base = Get-NyxRequiredValue -Value $Base -Name 'caminho base'
+    $Child = Get-NyxRequiredValue -Value $Child -Name 'caminho filho'
+    return [IO.Path]::Combine($Base, $Child)
+}
+
+$ProgramDataRoot = Get-NyxRequiredValue -Value ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)) -Name 'ProgramData'
+$ProgramFilesRoot = Get-NyxRequiredValue -Value ([Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)) -Name 'Program Files'
+$WindowsRoot = Get-NyxRequiredValue -Value $env:SystemRoot -Name 'SystemRoot'
+$SystemDriveRoot = Get-NyxRequiredValue -Value ([IO.Path]::GetPathRoot($WindowsRoot)) -Name 'SystemDrive'
+$ProgramFilesX86Root = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFilesX86)
+if ([string]::IsNullOrWhiteSpace($ProgramFilesX86Root)) {
+    $ProgramFilesX86Root = Join-NyxPath -Base $SystemDriveRoot -Child 'Program Files (x86)'
+}
+$TempRoot = Get-NyxRequiredValue -Value ([IO.Path]::GetTempPath()) -Name 'TEMP'
+$ComputerName = Get-NyxRequiredValue -Value ([Environment]::MachineName) -Name 'ComputerName'
+
+$NyxRoot = Join-NyxPath -Base $ProgramDataRoot -Child 'Nyx'
+$LogRoot = Join-NyxPath -Base $NyxRoot -Child 'Logs'
+$ToolRoot = Join-NyxPath -Base $NyxRoot -Child 'Tools'
+$WallpaperRoot = Join-NyxPath -Base $NyxRoot -Child 'Wallpapers'
+$UserStateRoot = Join-NyxPath -Base $NyxRoot -Child 'UserState'
+$StatePath = Join-NyxPath -Base $NyxRoot -Child 'provisioning-state.json'
+$LogPath = Join-NyxPath -Base $LogRoot -Child 'provisioning.log'
 
 function Initialize-NyxDirectories {
     foreach ($path in @($NyxRoot, $LogRoot, $ToolRoot, $WallpaperRoot, $UserStateRoot)) {
@@ -59,7 +91,7 @@ function Set-NyxState {
         provisionerVersion = $Version
         status = $Status
         detail = $Detail
-        computerName = $env:COMPUTERNAME
+        computerName = $ComputerName
         localUser = $LocalUserName
         apolloDisplayName = $ApolloDisplayName
         tailscaleHostname = $script:TailscaleHostname
@@ -82,8 +114,9 @@ function Assert-Environment {
         throw 'Este script precisa ser executado em um PowerShell elevado (Executar como administrador).'
     }
 
-    $script:Winget = (Get-Command winget.exe -ErrorAction SilentlyContinue).Source
-    if (-not $script:Winget) {
+    $wingetCommand = Get-Command winget.exe -ErrorAction SilentlyContinue
+    $script:Winget = if ($wingetCommand) { $wingetCommand.Source } else { $null }
+    if ([string]::IsNullOrWhiteSpace($script:Winget) -or -not (Test-Path -LiteralPath $script:Winget -PathType Leaf)) {
         throw 'WinGet não foi encontrado. Instale/atualize o App Installer da Microsoft antes de executar este script.'
     }
 
@@ -123,7 +156,12 @@ function Install-WingetPackage {
         [Parameter(Mandatory)] [string[]]$DetectionPaths
     )
 
-    if ($DetectionPaths | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }) {
+    $validDetectionPaths = @($DetectionPaths | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($validDetectionPaths.Count -eq 0) {
+        throw "$Name não possui nenhum caminho de detecção válido."
+    }
+
+    if ($validDetectionPaths | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }) {
         Write-NyxLog "$Name já está instalado."
         return
     }
@@ -140,7 +178,7 @@ function Install-WingetPackage {
     }
 
     Start-Sleep -Seconds 2
-    if (-not ($DetectionPaths | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })) {
+    if (-not ($validDetectionPaths | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })) {
         throw "$Name terminou a instalação, mas o executável esperado não foi encontrado."
     }
     Write-NyxLog "$Name instalado."
@@ -148,27 +186,27 @@ function Install-WingetPackage {
 
 function Install-Applications {
     Install-WingetPackage -Id 'Valve.Steam' -Name 'Steam' -DetectionPaths @(
-        (Join-Path ${env:ProgramFiles(x86)} 'Steam\steam.exe')
+        (Join-NyxPath -Base $ProgramFilesX86Root -Child 'Steam\steam.exe')
     )
 
     Install-WingetPackage -Id 'Brave.Brave' -Name 'Brave' -DetectionPaths @(
-        (Join-Path $env:ProgramFiles 'BraveSoftware\Brave-Browser\Application\brave.exe'),
-        (Join-Path ${env:ProgramFiles(x86)} 'BraveSoftware\Brave-Browser\Application\brave.exe')
+        (Join-NyxPath -Base $ProgramFilesRoot -Child 'BraveSoftware\Brave-Browser\Application\brave.exe'),
+        (Join-NyxPath -Base $ProgramFilesX86Root -Child 'BraveSoftware\Brave-Browser\Application\brave.exe')
     )
 
     Install-WingetPackage -Id 'Tailscale.Tailscale' -Name 'Tailscale' -DetectionPaths @(
-        (Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe')
+        (Join-NyxPath -Base $ProgramFilesRoot -Child 'Tailscale\tailscale.exe')
     )
 
     Install-WingetPackage -Id 'ClassicOldSong.Apollo' -Name 'Apollo' -DetectionPaths @(
-        (Join-Path $env:ProgramFiles 'Apollo\sunshine.exe')
+        (Join-NyxPath -Base $ProgramFilesRoot -Child 'Apollo\sunshine.exe')
     )
 }
 
 function Install-AndConfigureAutologon {
-    $zipPath = Join-Path $ToolRoot 'Autologon.zip'
-    $extractPath = Join-Path $ToolRoot 'Autologon'
-    $exePath = Join-Path $extractPath 'Autologon64.exe'
+    $zipPath = Join-NyxPath -Base $ToolRoot -Child 'Autologon.zip'
+    $extractPath = Join-NyxPath -Base $ToolRoot -Child 'Autologon'
+    $exePath = Join-NyxPath -Base $extractPath -Child 'Autologon64.exe'
 
     if (-not (Test-Path -LiteralPath $exePath -PathType Leaf)) {
         Write-NyxLog 'Baixando Sysinternals Autologon...'
@@ -188,7 +226,7 @@ function Install-AndConfigureAutologon {
 
     $process = Start-Process -FilePath $exePath -ArgumentList @(
         $LocalUserName,
-        $env:COMPUTERNAME,
+        $ComputerName,
         $LocalUserPassword,
         '/accepteula'
     ) -Wait -PassThru -WindowStyle Hidden
@@ -210,7 +248,7 @@ function Set-SystemBrandingAndLogon {
     New-ItemProperty -Path $systemPolicy -Name 'DontDisplayLockedUserId' -PropertyType DWord -Value 3 -Force | Out-Null
     New-ItemProperty -Path $systemPolicy -Name 'HideFastUserSwitching' -PropertyType DWord -Value 1 -Force | Out-Null
 
-    $shellPath = Join-Path $env:SystemDrive 'Users\Default\AppData\Local\Microsoft\Windows\Shell'
+    $shellPath = Join-NyxPath -Base $SystemDriveRoot -Child 'Users\Default\AppData\Local\Microsoft\Windows\Shell'
     New-Item -Path $shellPath -ItemType Directory -Force | Out-Null
     $layoutPath = Join-Path $shellPath 'LayoutModification.xml'
 @'
@@ -270,8 +308,8 @@ function Download-Wallpapers {
 }
 
 function Configure-Apollo {
-    $apolloExecutable = Join-Path $env:ProgramFiles 'Apollo\sunshine.exe'
-    $configPath = Join-Path $env:ProgramFiles 'Apollo\config\sunshine.conf'
+    $apolloExecutable = Join-NyxPath -Base $ProgramFilesRoot -Child 'Apollo\sunshine.exe'
+    $configPath = Join-NyxPath -Base $ProgramFilesRoot -Child 'Apollo\config\sunshine.conf'
     if (-not (Test-Path -LiteralPath $apolloExecutable -PathType Leaf)) {
         throw 'Apollo não foi encontrado após a instalação.'
     }
@@ -316,7 +354,7 @@ function Read-TailscaleEnrollmentInput {
     do {
         $hostnameInput = (Read-Host 'Tailscale hostname').Trim()
         if (-not $hostnameInput) {
-            $hostnameInput = $env:COMPUTERNAME.ToLowerInvariant()
+            $hostnameInput = $ComputerName.ToLowerInvariant()
         }
         if ($hostnameInput -notmatch '^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$') {
             Write-Host 'Hostname inválido. Use apenas letras, números e hífen.' -ForegroundColor Yellow
@@ -337,7 +375,7 @@ function Connect-Tailscale {
         return
     }
 
-    $tailscale = Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe'
+    $tailscale = Join-NyxPath -Base $ProgramFilesRoot -Child 'Tailscale\tailscale.exe'
     if (-not (Test-Path -LiteralPath $tailscale -PathType Leaf)) {
         throw 'Tailscale não foi encontrado após a instalação.'
     }
@@ -368,13 +406,19 @@ function Connect-Tailscale {
         throw 'A auth key do Tailscale não foi informada.'
     }
 
-    $keyFile = Join-Path $env:TEMP ("nyx-ts-{0}.key" -f ([guid]::NewGuid().ToString('N')))
+    $keyFile = Join-NyxPath -Base $TempRoot -Child ("nyx-ts-{0}.key" -f ([guid]::NewGuid().ToString('N')))
     $bstr = [IntPtr]::Zero
     try {
         $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($script:TailscaleSecureKey)
         $plainKey = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+        if ([string]::IsNullOrWhiteSpace($plainKey)) {
+            throw 'A auth key do Tailscale resultou vazia após a leitura.'
+        }
         Set-Content -LiteralPath $keyFile -Value $plainKey -NoNewline -Encoding Ascii
         Remove-Variable plainKey -ErrorAction SilentlyContinue
+        if (-not (Test-Path -LiteralPath $keyFile -PathType Leaf) -or (Get-Item -LiteralPath $keyFile).Length -le 0) {
+            throw 'Não foi possível preparar o arquivo temporário da auth key do Tailscale.'
+        }
 
         & $tailscale up "--auth-key=file:$keyFile" "--hostname=$script:TailscaleHostname" '--unattended=true' '--accept-routes=false' *> $null
         if ($LASTEXITCODE -ne 0) {
@@ -393,9 +437,9 @@ function Connect-Tailscale {
 }
 
 function Register-NyxUserConfiguration {
-    $configScript = Join-Path $NyxRoot 'Configure-NyxUser.ps1'
-    $cleanupScript = Join-Path $NyxRoot 'Cleanup-NyxUserTask.ps1'
-    $markerPath = Join-Path $UserStateRoot 'user-profile-ready.json'
+    $configScript = Join-NyxPath -Base $NyxRoot -Child 'Configure-NyxUser.ps1'
+    $cleanupScript = Join-NyxPath -Base $NyxRoot -Child 'Cleanup-NyxUserTask.ps1'
+    $markerPath = Join-NyxPath -Base $UserStateRoot -Child 'user-profile-ready.json'
 
     Remove-Item -LiteralPath $markerPath -Force -ErrorAction SilentlyContinue
 
@@ -406,11 +450,13 @@ $ErrorActionPreference = 'Stop'
 $expectedUser = 'nyx'
 if ($env:USERNAME -ine $expectedUser) { exit 0 }
 
-$nyxRoot = Join-Path $env:ProgramData 'Nyx'
-$wallpaperRoot = Join-Path $nyxRoot 'Wallpapers'
-$userStateRoot = Join-Path $nyxRoot 'UserState'
-$markerPath = Join-Path $userStateRoot 'user-profile-ready.json'
-$logPath = Join-Path $userStateRoot 'user-configuration.log'
+$programData = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
+if ([string]::IsNullOrWhiteSpace($programData)) { throw 'ProgramData indisponível.' }
+$nyxRoot = [IO.Path]::Combine($programData, 'Nyx')
+$wallpaperRoot = [IO.Path]::Combine($nyxRoot, 'Wallpapers')
+$userStateRoot = [IO.Path]::Combine($nyxRoot, 'UserState')
+$markerPath = [IO.Path]::Combine($userStateRoot, 'user-profile-ready.json')
+$logPath = [IO.Path]::Combine($userStateRoot, 'user-configuration.log')
 
 function Write-UserLog([string]$Message) {
     Add-Content -LiteralPath $logPath -Value ('{0:o} {1}' -f (Get-Date), $Message) -Encoding UTF8
@@ -425,9 +471,13 @@ try {
     }
 
     if ($sourceWallpapers.Count -gt 0) {
-        $pictures = [Environment]::GetFolderPath('MyPictures')
-        if (-not $pictures) { $pictures = Join-Path $env:USERPROFILE 'Pictures' }
-        $wallpaperDir = Join-Path $pictures 'Nyx Wallpapers'
+        $pictures = [Environment]::GetFolderPath([Environment+SpecialFolder]::MyPictures)
+        if ([string]::IsNullOrWhiteSpace($pictures)) {
+            $userProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+            if ([string]::IsNullOrWhiteSpace($userProfile)) { throw 'Perfil do usuário indisponível.' }
+            $pictures = [IO.Path]::Combine($userProfile, 'Pictures')
+        }
+        $wallpaperDir = [IO.Path]::Combine($pictures, 'Nyx Wallpapers')
         New-Item -Path $wallpaperDir -ItemType Directory -Force | Out-Null
 
         foreach ($source in $sourceWallpapers) {
@@ -464,7 +514,9 @@ public static class NyxWallpaper {
             Remove-Item -Force -ErrorAction SilentlyContinue
     }
 
-    $layoutRoot = Join-Path $env:LOCALAPPDATA 'Nyx'
+    $localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+    if ([string]::IsNullOrWhiteSpace($localAppData)) { throw 'LocalAppData indisponível.' }
+    $layoutRoot = [IO.Path]::Combine($localAppData, 'Nyx')
     New-Item -Path $layoutRoot -ItemType Directory -Force | Out-Null
     $layoutPath = Join-Path $layoutRoot 'taskbar-layout.xml'
 @"
@@ -502,7 +554,9 @@ catch {
 '@ | Set-Content -LiteralPath $configScript -Encoding UTF8
 
 @'
-$markerPath = Join-Path $env:ProgramData 'Nyx\UserState\user-profile-ready.json'
+$programData = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
+if ([string]::IsNullOrWhiteSpace($programData)) { exit 1 }
+$markerPath = [IO.Path]::Combine($programData, 'Nyx\UserState\user-profile-ready.json')
 if (-not (Test-Path -LiteralPath $markerPath -PathType Leaf)) { exit 0 }
 try {
     $state = Get-Content -LiteralPath $markerPath -Raw | ConvertFrom-Json
@@ -549,7 +603,12 @@ try {
     Write-NyxLog "Nyx Cloud standalone $Version iniciado."
 
     Assert-Environment
-    Read-TailscaleEnrollmentInput
+    if (-not $SkipTailscaleEnrollment) {
+        Read-TailscaleEnrollmentInput
+    }
+    else {
+        $script:TailscaleHostname = $ComputerName.ToLowerInvariant()
+    }
     Set-SystemBrandingAndLogon
     Ensure-NyxUser
     Download-Wallpapers
