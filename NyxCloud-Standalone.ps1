@@ -14,7 +14,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$Version = '0.4.5-standalone'
+$Version = '0.4.6-standalone'
 $LocalUserName = 'nyx'
 $LocalUserPassword = 'nyxcloud'
 $ApolloDisplayName = 'nyxcloud'
@@ -54,6 +54,7 @@ if ([string]::IsNullOrWhiteSpace($ProgramFilesX86Root)) {
     $ProgramFilesX86Root = Join-NyxPath -Base $SystemDriveRoot -Child 'Program Files (x86)'
 }
 $TempRoot = Get-NyxRequiredValue -Value ([IO.Path]::GetTempPath()) -Name 'TEMP'
+$LocalAppDataRoot = Get-NyxRequiredValue -Value ([Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)) -Name 'LocalAppData'
 $ComputerName = Get-NyxRequiredValue -Value ([Environment]::MachineName) -Name 'ComputerName'
 
 $NyxRoot = Join-NyxPath -Base $ProgramDataRoot -Child 'Nyx'
@@ -233,8 +234,19 @@ function Install-WingetPackage {
         '--disable-interactivity', '--source', 'winget'
     )
     $process = Start-Process -FilePath $script:Winget -ArgumentList $args -Wait -PassThru -WindowStyle Hidden
-    if ($process.ExitCode -ne 0) {
-        throw "$Name falhou no WinGet com exit code $($process.ExitCode)."
+    $exitCode = [int]$process.ExitCode
+
+    if ($exitCode -eq -1978335189) {
+        Write-NyxLog "$Name já está instalado/atualizado; WinGet não encontrou atualização aplicável."
+        return
+    }
+
+    if ($exitCode -ne 0) {
+        if ($validDetectionPaths | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }) {
+            Write-NyxLog "$Name está presente apesar do WinGet retornar exit code $exitCode; continuando." 'WARN'
+            return
+        }
+        throw "$Name falhou no WinGet com exit code $exitCode."
     }
 
     Start-Sleep -Seconds 2
@@ -251,7 +263,8 @@ function Install-Applications {
 
     Install-WingetPackage -Id 'Brave.Brave' -Name 'Brave' -DetectionPaths @(
         (Join-NyxPath -Base $ProgramFilesRoot -Child 'BraveSoftware\Brave-Browser\Application\brave.exe'),
-        (Join-NyxPath -Base $ProgramFilesX86Root -Child 'BraveSoftware\Brave-Browser\Application\brave.exe')
+        (Join-NyxPath -Base $ProgramFilesX86Root -Child 'BraveSoftware\Brave-Browser\Application\brave.exe'),
+        (Join-NyxPath -Base $LocalAppDataRoot -Child 'BraveSoftware\Brave-Browser\Application\brave.exe')
     )
 
     Install-WingetPackage -Id 'Tailscale.Tailscale' -Name 'Tailscale' -DetectionPaths @(
