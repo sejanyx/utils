@@ -14,7 +14,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$Version = '0.4.4-standalone'
+$Version = '0.4.5-standalone'
 $LocalUserName = 'nyx'
 $LocalUserPassword = 'nyxcloud'
 $ApolloDisplayName = 'nyxcloud'
@@ -121,26 +121,87 @@ function Assert-Environment {
 
 }
 
-function Ensure-NyxUser {
-    $securePassword = ConvertTo-SecureString -String $LocalUserPassword -AsPlainText -Force
-    $user = Get-LocalUser -Name $LocalUserName -ErrorAction SilentlyContinue
+function Invoke-NyxWithTemporaryPasswordPolicy {
+    param([Parameter(Mandatory)] [scriptblock]$Action)
 
-    if (-not $user) {
-        New-LocalUser `
-            -Name $LocalUserName `
-            -Password $securePassword `
-            -AccountNeverExpires `
-            -PasswordNeverExpires `
-            -UserMayNotChangePassword `
-            -Description 'Nyx Cloud Gaming' | Out-Null
-        Write-NyxLog 'Usuário local nyx criado.'
+    $secedit = Join-NyxPath -Base $WindowsRoot -Child 'System32\secedit.exe'
+    if (-not (Test-Path -LiteralPath $secedit -PathType Leaf)) {
+        throw 'secedit.exe não foi encontrado.'
     }
-    else {
-        if (-not $user.Enabled) {
-            Enable-LocalUser -Name $LocalUserName
+
+    $policyRoot = Join-NyxPath -Base $TempRoot -Child ("nyx-policy-{0}" -f ([guid]::NewGuid().ToString('N')))
+    New-Item -Path $policyRoot -ItemType Directory -Force | Out-Null
+    $backupInf = Join-NyxPath -Base $policyRoot -Child 'original.inf'
+    $relaxedInf = Join-NyxPath -Base $policyRoot -Child 'temporary.inf'
+    $database = Join-NyxPath -Base $policyRoot -Child 'nyx.sdb'
+    $restoreDatabase = Join-NyxPath -Base $policyRoot -Child 'restore.sdb'
+    $restoreNeeded = $false
+
+    try {
+        $export = Start-Process -FilePath $secedit -ArgumentList @('/export','/cfg',"`"$backupInf`"",'/areas','SECURITYPOLICY','/quiet') -Wait -PassThru -WindowStyle Hidden
+        if ($export.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $backupInf -PathType Leaf)) {
+            throw "Não foi possível salvar a política de senha atual (secedit exit $($export.ExitCode))."
         }
-        Set-LocalUser -Name $LocalUserName -Password $securePassword -PasswordNeverExpires $true
-        Write-NyxLog 'Usuário local nyx já existia; senha e estado foram normalizados.'
+
+        @"
+[Unicode]
+Unicode=yes
+[System Access]
+MinimumPasswordAge = 0
+MinimumPasswordLength = 0
+PasswordComplexity = 0
+PasswordHistorySize = 0
+[Version]
+signature="`$CHICAGO`$"
+Revision=1
+"@ | Set-Content -LiteralPath $relaxedInf -Encoding Unicode
+
+        $apply = Start-Process -FilePath $secedit -ArgumentList @('/configure','/db',"`"$database`"",'/cfg',"`"$relaxedInf`"",'/areas','SECURITYPOLICY','/quiet') -Wait -PassThru -WindowStyle Hidden
+        if ($apply.ExitCode -ne 0) {
+            throw "Não foi possível aplicar temporariamente a política necessária para a senha local (secedit exit $($apply.ExitCode))."
+        }
+        $restoreNeeded = $true
+
+        & $Action
+    }
+    finally {
+        if ($restoreNeeded -and (Test-Path -LiteralPath $backupInf -PathType Leaf)) {
+            try {
+                $restore = Start-Process -FilePath $secedit -ArgumentList @('/configure','/db',"`"$restoreDatabase`"",'/cfg',"`"$backupInf`"",'/areas','SECURITYPOLICY','/quiet') -Wait -PassThru -WindowStyle Hidden
+                if ($restore.ExitCode -ne 0) {
+                    Write-NyxLog "A política de senha original não pôde ser restaurada automaticamente (secedit exit $($restore.ExitCode))." 'WARN'
+                }
+            }
+            catch {
+                Write-NyxLog "Falha ao restaurar a política de senha original: $($_.Exception.Message)" 'WARN'
+            }
+        }
+        Remove-Item -LiteralPath $policyRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Ensure-NyxUser {
+    Invoke-NyxWithTemporaryPasswordPolicy -Action {
+        $securePassword = ConvertTo-SecureString -String $LocalUserPassword -AsPlainText -Force
+        $user = Get-LocalUser -Name $LocalUserName -ErrorAction SilentlyContinue
+
+        if (-not $user) {
+            New-LocalUser `
+                -Name $LocalUserName `
+                -Password $securePassword `
+                -AccountNeverExpires `
+                -PasswordNeverExpires `
+                -UserMayNotChangePassword `
+                -Description 'Nyx Cloud Gaming' | Out-Null
+            Write-NyxLog 'Usuário local nyx criado.'
+        }
+        else {
+            if (-not $user.Enabled) {
+                Enable-LocalUser -Name $LocalUserName
+            }
+            Set-LocalUser -Name $LocalUserName -Password $securePassword -PasswordNeverExpires $true
+            Write-NyxLog 'Usuário local nyx já existia; senha e estado foram normalizados.'
+        }
     }
 
     $admins = Get-LocalGroup -SID 'S-1-5-32-544'
