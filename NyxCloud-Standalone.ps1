@@ -23,7 +23,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$Version = '0.4.4-standalone'
+$Version = '0.4.5-standalone'
 $LocalUserName = 'nyx'
 $LocalUserPassword = 'nyxcloud'
 $ApolloDisplayName = 'nyxcloud'
@@ -348,6 +348,7 @@ function Configure-Apollo {
             sunshine_name = $ApolloDisplayName
             upnp = 'disabled'
             headless_mode = 'enabled'
+            dd_configuration_option = 'ensure_only_display'
             origin_web_ui_allowed = 'wan'
         }
         $remaining = @($existing | Where-Object {
