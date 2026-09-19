@@ -39,7 +39,7 @@ function Get-NyxRequiredValue {
         [Parameter(Mandatory)] [string]$Name
     )
     if ([string]::IsNullOrWhiteSpace($Value)) {
-        throw "Valor obrigatÃ³rio ausente: $Name."
+        throw "Valor obrigatório ausente: $Name."
     }
     return $Value.Trim()
 }
@@ -109,7 +109,7 @@ function Set-NyxState {
 
 function Assert-Environment {
     if ($PSVersionTable.PSVersion -lt [version]'5.1') {
-        throw 'PowerShell 5.1 ou superior Ã© necessÃ¡rio.'
+        throw 'PowerShell 5.1 ou superior é necessário.'
     }
 
     if (-not [Environment]::Is64BitProcess) {
@@ -125,7 +125,7 @@ function Assert-Environment {
     $wingetCommand = Get-Command winget.exe -ErrorAction SilentlyContinue
     $script:Winget = if ($wingetCommand) { $wingetCommand.Source } else { $null }
     if ([string]::IsNullOrWhiteSpace($script:Winget) -or -not (Test-Path -LiteralPath $script:Winget -PathType Leaf)) {
-        throw 'WinGet nÃ£o foi encontrado. Instale/atualize o App Installer da Microsoft antes de executar este script.'
+        throw 'WinGet não foi encontrado. Instale/atualize o App Installer da Microsoft antes de executar este script.'
     }
 
 }
@@ -142,19 +142,19 @@ function Ensure-NyxUser {
             -PasswordNeverExpires `
             -UserMayNotChangePassword `
             -Description 'Nyx Cloud Gaming' | Out-Null
-        Write-NyxLog 'UsuÃ¡rio local nyx criado.'
+        Write-NyxLog 'Usuário local nyx criado.'
     }
     else {
         if (-not $user.Enabled) {
             Enable-LocalUser -Name $LocalUserName
         }
         Set-LocalUser -Name $LocalUserName -Password $securePassword -PasswordNeverExpires $true
-        Write-NyxLog 'UsuÃ¡rio local nyx jÃ¡ existia; senha e estado foram normalizados.'
+        Write-NyxLog 'Usuário local nyx já existia; senha e estado foram normalizados.'
     }
 
     $admins = Get-LocalGroup -SID 'S-1-5-32-544'
     Add-LocalGroupMember -Group $admins.Name -Member $LocalUserName -ErrorAction SilentlyContinue
-    Write-NyxLog 'UsuÃ¡rio nyx confirmado como administrador local.'
+    Write-NyxLog 'Usuário nyx confirmado como administrador local.'
 }
 
 function Install-WingetPackage {
@@ -166,11 +166,11 @@ function Install-WingetPackage {
 
     $validDetectionPaths = @($DetectionPaths | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
     if ($validDetectionPaths.Count -eq 0) {
-        throw "$Name nÃ£o possui nenhum caminho de detecÃ§Ã£o vÃ¡lido."
+        throw "$Name não possui nenhum caminho de detecção válido."
     }
 
     if ($validDetectionPaths | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }) {
-        Write-NyxLog "$Name jÃ¡ estÃ¡ instalado."
+        Write-NyxLog "$Name já está instalado."
         return
     }
 
@@ -187,7 +187,7 @@ function Install-WingetPackage {
 
     Start-Sleep -Seconds 2
     if (-not ($validDetectionPaths | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })) {
-        throw "$Name terminou a instalaÃ§Ã£o, mas o executÃ¡vel esperado nÃ£o foi encontrado."
+        throw "$Name terminou a instalação, mas o executável esperado não foi encontrado."
     }
     Write-NyxLog "$Name instalado."
 }
@@ -224,12 +224,12 @@ function Install-AndConfigureAutologon {
     }
 
     if (-not (Test-Path -LiteralPath $exePath -PathType Leaf)) {
-        throw 'Autologon64.exe nÃ£o foi encontrado apÃ³s a extraÃ§Ã£o.'
+        throw 'Autologon64.exe não foi encontrado após a extração.'
     }
 
     $signature = Get-AuthenticodeSignature -FilePath $exePath
     if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Microsoft') {
-        throw 'Assinatura do Sysinternals Autologon invÃ¡lida ou inesperada.'
+        throw 'Assinatura do Sysinternals Autologon inválida ou inesperada.'
     }
 
     $process = Start-Process -FilePath $exePath -ArgumentList @(
@@ -242,7 +242,7 @@ function Install-AndConfigureAutologon {
     if ($process.ExitCode -ne 0) {
         throw "Sysinternals Autologon falhou com exit code $($process.ExitCode)."
     }
-    Write-NyxLog 'Autologon do usuÃ¡rio nyx configurado por segredo LSA.'
+    Write-NyxLog 'Autologon do usuário nyx configurado por segredo LSA.'
 }
 
 function Set-SystemBrandingAndLogon {
@@ -288,14 +288,14 @@ function Download-Wallpapers {
             $uri = [Uri]$url
             $fileName = [IO.Path]::GetFileName($uri.AbsolutePath)
             if (-not $fileName) {
-                throw 'URL de wallpaper sem nome de arquivo vÃ¡lido'
+                throw 'URL de wallpaper sem nome de arquivo válido'
             }
 
             $destination = Join-Path $WallpaperRoot $fileName
             Write-NyxLog "Baixando wallpaper $fileName..."
             Invoke-WebRequest -Uri $url -OutFile $destination -UseBasicParsing
             if ((Get-Item -LiteralPath $destination).Length -lt 1024) {
-                throw 'arquivo recebido Ã© pequeno demais para ser o wallpaper esperado'
+                throw 'arquivo recebido é pequeno demais para ser o wallpaper esperado'
             }
             $downloaded++
         }
@@ -308,7 +308,7 @@ function Download-Wallpapers {
     }
 
     if ($downloaded -eq 0) {
-        Write-NyxLog 'Nenhum wallpaper pÃ´de ser baixado.' 'WARN'
+        Write-NyxLog 'Nenhum wallpaper pôde ser baixado.' 'WARN'
     }
     else {
         Write-NyxLog "$downloaded wallpaper(s) preparado(s)."
@@ -320,7 +320,7 @@ function Configure-Apollo {
     $configPath = Join-NyxPath -Base $ProgramFilesRoot -Child 'Apollo\config\sunshine.conf'
     $credentialsPath = Join-NyxPath -Base $ProgramFilesRoot -Child 'Apollo\config\sunshine_state.json'
     if (-not (Test-Path -LiteralPath $apolloExecutable -PathType Leaf)) {
-        throw 'Apollo nÃ£o foi encontrado apÃ³s a instalaÃ§Ã£o.'
+        throw 'Apollo não foi encontrado após a instalação.'
     }
 
     $apolloServices = @(Get-CimInstance Win32_Service -ErrorAction SilentlyContinue | Where-Object {
@@ -328,7 +328,7 @@ function Configure-Apollo {
         ($_.PathName -match '\\Apollo\\' -and $_.PathName -match '\\sunshine(?:svc)?\.exe(?:"|\s|$)')
     })
     if ($apolloServices.Count -eq 0) {
-        throw 'O serviÃ§o do Apollo nÃ£o foi encontrado apÃ³s a instalaÃ§Ã£o.'
+        throw 'O serviço do Apollo não foi encontrado após a instalação.'
     }
 
     try {
@@ -366,24 +366,24 @@ function Configure-Apollo {
             -PassThru `
             -WindowStyle Hidden
         if ($credentialProcess.ExitCode -ne 0) {
-            throw "NÃ£o foi possÃ­vel configurar as credenciais do Apollo (exit code $($credentialProcess.ExitCode))."
+            throw "Não foi possível configurar as credenciais do Apollo (exit code $($credentialProcess.ExitCode))."
         }
 
         if (-not (Test-Path -LiteralPath $credentialsPath -PathType Leaf)) {
-            throw 'O Apollo nÃ£o criou o arquivo de credenciais esperado.'
+            throw 'O Apollo não criou o arquivo de credenciais esperado.'
         }
         try {
             $credentialState = Get-Content -LiteralPath $credentialsPath -Raw | ConvertFrom-Json
         }
         catch {
-            throw 'O Apollo criou um arquivo de credenciais invÃ¡lido.'
+            throw 'O Apollo criou um arquivo de credenciais inválido.'
         }
         if (
             [string]$credentialState.username -ne $ApolloUsername -or
             [string]::IsNullOrWhiteSpace([string]$credentialState.password) -or
             [string]::IsNullOrWhiteSpace([string]$credentialState.salt)
         ) {
-            throw 'O Apollo nÃ£o persistiu as credenciais administrativas corretamente.'
+            throw 'O Apollo não persistiu as credenciais administrativas corretamente.'
         }
     }
     finally {
@@ -419,7 +419,7 @@ function Read-TailscaleEnrollmentInput {
             $hostnameInput = $ComputerName.ToLowerInvariant()
         }
         if ($hostnameInput -notmatch '^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$') {
-            Write-Host 'Hostname invÃ¡lido. Use apenas letras, nÃºmeros e hÃ­fen.' -ForegroundColor Yellow
+            Write-Host 'Hostname inválido. Use apenas letras, números e hífen.' -ForegroundColor Yellow
             $hostnameInput = $null
         }
     } while (-not $hostnameInput)
@@ -427,7 +427,7 @@ function Read-TailscaleEnrollmentInput {
     $script:TailscaleHostname = $hostnameInput.ToLowerInvariant()
     $script:TailscaleSecureKey = Read-Host 'Tailscale auth key' -AsSecureString
     if ($script:TailscaleSecureKey.Length -eq 0) {
-        throw 'A auth key do Tailscale nÃ£o pode ficar vazia.'
+        throw 'A auth key do Tailscale não pode ficar vazia.'
     }
 }
 
@@ -439,7 +439,7 @@ function Connect-Tailscale {
 
     $tailscale = Join-NyxPath -Base $ProgramFilesRoot -Child 'Tailscale\tailscale.exe'
     if (-not (Test-Path -LiteralPath $tailscale -PathType Leaf)) {
-        throw 'Tailscale nÃ£o foi encontrado apÃ³s a instalaÃ§Ã£o.'
+        throw 'Tailscale não foi encontrado após a instalação.'
     }
 
     $registered = $false
@@ -457,15 +457,15 @@ function Connect-Tailscale {
     if ($registered) {
         & $tailscale set "--hostname=$script:TailscaleHostname" *> $null
         if ($LASTEXITCODE -ne 0) {
-            throw 'NÃ£o foi possÃ­vel atualizar o hostname do Tailscale.'
+            throw 'Não foi possível atualizar o hostname do Tailscale.'
         }
         $script:TailscaleSecureKey = $null
-        Write-NyxLog 'Tailscale jÃ¡ estava registrado; hostname atualizado.'
+        Write-NyxLog 'Tailscale já estava registrado; hostname atualizado.'
         return
     }
 
     if (-not $script:TailscaleSecureKey -or $script:TailscaleSecureKey.Length -eq 0) {
-        throw 'A auth key do Tailscale nÃ£o foi informada.'
+        throw 'A auth key do Tailscale não foi informada.'
     }
 
     $keyFile = Join-NyxPath -Base $TempRoot -Child ("nyx-ts-{0}.key" -f ([guid]::NewGuid().ToString('N')))
@@ -474,17 +474,17 @@ function Connect-Tailscale {
         $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($script:TailscaleSecureKey)
         $plainKey = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
         if ([string]::IsNullOrWhiteSpace($plainKey)) {
-            throw 'A auth key do Tailscale resultou vazia apÃ³s a leitura.'
+            throw 'A auth key do Tailscale resultou vazia após a leitura.'
         }
         Set-Content -LiteralPath $keyFile -Value $plainKey -NoNewline -Encoding Ascii
         Remove-Variable plainKey -ErrorAction SilentlyContinue
         if (-not (Test-Path -LiteralPath $keyFile -PathType Leaf) -or (Get-Item -LiteralPath $keyFile).Length -le 0) {
-            throw 'NÃ£o foi possÃ­vel preparar o arquivo temporÃ¡rio da auth key do Tailscale.'
+            throw 'Não foi possível preparar o arquivo temporário da auth key do Tailscale.'
         }
 
         & $tailscale up "--auth-key=file:$keyFile" "--hostname=$script:TailscaleHostname" '--unattended=true' '--accept-routes=false' *> $null
         if ($LASTEXITCODE -ne 0) {
-            throw 'Falha ao registrar a mÃ¡quina no Tailscale.'
+            throw 'Falha ao registrar a máquina no Tailscale.'
         }
     }
     finally {
@@ -513,7 +513,7 @@ $expectedUser = 'nyx'
 if ($env:USERNAME -ine $expectedUser) { exit 0 }
 
 $programData = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
-if ([string]::IsNullOrWhiteSpace($programData)) { throw 'ProgramData indisponÃ­vel.' }
+if ([string]::IsNullOrWhiteSpace($programData)) { throw 'ProgramData indisponível.' }
 $nyxRoot = [IO.Path]::Combine($programData, 'Nyx')
 $wallpaperRoot = [IO.Path]::Combine($nyxRoot, 'Wallpapers')
 $userStateRoot = [IO.Path]::Combine($nyxRoot, 'UserState')
@@ -536,7 +536,7 @@ try {
         $pictures = [Environment]::GetFolderPath([Environment+SpecialFolder]::MyPictures)
         if ([string]::IsNullOrWhiteSpace($pictures)) {
             $userProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
-            if ([string]::IsNullOrWhiteSpace($userProfile)) { throw 'Perfil do usuÃ¡rio indisponÃ­vel.' }
+            if ([string]::IsNullOrWhiteSpace($userProfile)) { throw 'Perfil do usuário indisponível.' }
             $pictures = [IO.Path]::Combine($userProfile, 'Pictures')
         }
         $wallpaperDir = [IO.Path]::Combine($pictures, 'Nyx Wallpapers')
@@ -561,12 +561,12 @@ public static class NyxWallpaper {
 }
 "@
         if (-not [NyxWallpaper]::SystemParametersInfo(20, 0, $userWallpaper, 3)) {
-            throw 'O Windows nÃ£o aceitou o wallpaper.'
+            throw 'O Windows não aceitou o wallpaper.'
         }
         $wallpaperName = $selected.Name
     }
     else {
-        Write-UserLog 'Nenhum wallpaper foi encontrado; personalizaÃ§Ã£o continuarÃ¡ sem ele.'
+        Write-UserLog 'Nenhum wallpaper foi encontrado; personalização continuará sem ele.'
     }
 
     $desktop = [Environment]::GetFolderPath('Desktop')
@@ -577,7 +577,7 @@ public static class NyxWallpaper {
     }
 
     $localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
-    if ([string]::IsNullOrWhiteSpace($localAppData)) { throw 'LocalAppData indisponÃ­vel.' }
+    if ([string]::IsNullOrWhiteSpace($localAppData)) { throw 'LocalAppData indisponível.' }
     $layoutRoot = [IO.Path]::Combine($localAppData, 'Nyx')
     New-Item -Path $layoutRoot -ItemType Directory -Force | Out-Null
     $layoutPath = Join-Path $layoutRoot 'taskbar-layout.xml'
@@ -646,7 +646,7 @@ catch { exit 1 }
     $cleanupSettings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 5) -StartWhenAvailable
     Register-ScheduledTask -TaskName 'Nyx-CleanupUserTask' -Action $cleanupAction -Trigger $cleanupTrigger -Principal $cleanupPrincipal -Settings $cleanupSettings -Force | Out-Null
 
-    Write-NyxLog 'PersonalizaÃ§Ã£o do primeiro logon do nyx registrada.'
+    Write-NyxLog 'Personalização do primeiro logon do nyx registrada.'
 }
 
 function Clear-PublicDesktopShortcuts {
@@ -667,7 +667,7 @@ try {
     if ($RepairApolloOnly) {
         Configure-Apollo
         Set-ApolloFirewallRule
-        Write-NyxLog 'Reparo do Apollo concluÃ­do.'
+        Write-NyxLog 'Reparo do Apollo concluído.'
         Write-Host ''
         Write-Host 'Apollo reparado com credenciais nyx / nyxcloud.'
         exit 0
@@ -695,22 +695,22 @@ try {
     Clear-PublicDesktopShortcuts
 
     Set-NyxState -Status 'AWAITING_USER_PROFILE'
-    Write-NyxLog 'Etapa administrativa concluÃ­da. O usuÃ¡rio nyx serÃ¡ configurado no prÃ³ximo logon.'
+    Write-NyxLog 'Etapa administrativa concluída. O usuário nyx será configurado no próximo logon.'
 
     if (-not $SkipRestart) {
-        Write-NyxLog 'Reiniciando a mÃ¡quina em 30 segundos.'
-        shutdown.exe /r /t 30 /c 'Provisionamento Nyx concluÃ­do. Reiniciando para finalizar o perfil.' /d p:4:1 | Out-Null
+        Write-NyxLog 'Reiniciando a máquina em 30 segundos.'
+        shutdown.exe /r /t 30 /c 'Provisionamento Nyx concluído. Reiniciando para finalizar o perfil.' /d p:4:1 | Out-Null
     }
     else {
-        Write-NyxLog 'ReinÃ­cio automÃ¡tico ignorado por -SkipRestart.' 'WARN'
+        Write-NyxLog 'Reinício automático ignorado por -SkipRestart.' 'WARN'
     }
 
     Write-Host ''
-    Write-Host 'Nyx Cloud: etapa administrativa concluÃ­da.'
-    Write-Host 'UsuÃ¡rio local: nyx'
+    Write-Host 'Nyx Cloud: etapa administrativa concluída.'
+    Write-Host 'Usuário local: nyx'
     Write-Host 'Senha: nyxcloud'
     if ($SkipRestart) {
-        Write-Host 'Reinicie a mÃ¡quina manualmente para concluir o autologon e o wallpaper.'
+        Write-Host 'Reinicie a máquina manualmente para concluir o autologon e o wallpaper.'
     }
     exit 0
 }
