@@ -1,5 +1,3 @@
-
-
 $WallpaperUrls = @(
     'https://raw.githubusercontent.com/sejanyx/utils/refs/heads/main/a.png',
     'https://raw.githubusercontent.com/sejanyx/utils/refs/heads/main/b.png',
@@ -16,7 +14,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$Version = '0.4.3-standalone'
+$Version = '0.4.4-standalone'
 $LocalUserName = 'nyx'
 $LocalUserPassword = 'nyxcloud'
 $ApolloDisplayName = 'nyxcloud'
@@ -24,6 +22,7 @@ $ApolloUsername = 'nyx'
 $ApolloPassword = 'nyxcloud'
 $script:TailscaleHostname = $null
 $script:TailscaleSecureKey = $null
+$script:CurrentStage = 'startup'
 
 function Get-NyxRequiredValue {
     param(
@@ -238,19 +237,30 @@ function Install-AndConfigureAutologon {
 }
 
 function Set-SystemBrandingAndLogon {
-    $oemPath = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\OEMInformation'
-    New-Item -Path $oemPath -Force | Out-Null
-    Set-ItemProperty -Path $oemPath -Name 'Model' -Value 'Nyx cloud' -Force
+    try {
+        $oemPath = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\OEMInformation'
+        New-Item -Path $oemPath -Force | Out-Null
+        Set-ItemProperty -Path $oemPath -Name 'Model' -Value 'Nyx cloud' -Force
+    }
+    catch {
+        Write-NyxLog "OEM branding ignorado: $($_.Exception.Message)" 'WARN'
+    }
 
-    $systemPolicy = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
-    New-Item -Path $systemPolicy -Force | Out-Null
-    New-ItemProperty -Path $systemPolicy -Name 'dontdisplaylastusername' -PropertyType DWord -Value 1 -Force | Out-Null
-    New-ItemProperty -Path $systemPolicy -Name 'DontDisplayLockedUserId' -PropertyType DWord -Value 3 -Force | Out-Null
-    New-ItemProperty -Path $systemPolicy -Name 'HideFastUserSwitching' -PropertyType DWord -Value 1 -Force | Out-Null
+    try {
+        $systemPolicy = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
+        New-Item -Path $systemPolicy -Force | Out-Null
+        New-ItemProperty -Path $systemPolicy -Name 'dontdisplaylastusername' -PropertyType DWord -Value 1 -Force | Out-Null
+        New-ItemProperty -Path $systemPolicy -Name 'DontDisplayLockedUserId' -PropertyType DWord -Value 3 -Force | Out-Null
+        New-ItemProperty -Path $systemPolicy -Name 'HideFastUserSwitching' -PropertyType DWord -Value 1 -Force | Out-Null
+    }
+    catch {
+        Write-NyxLog "Políticas visuais de logon ignoradas: $($_.Exception.Message)" 'WARN'
+    }
 
-    $shellPath = Join-NyxPath -Base $SystemDriveRoot -Child 'Users\Default\AppData\Local\Microsoft\Windows\Shell'
-    New-Item -Path $shellPath -ItemType Directory -Force | Out-Null
-    $layoutPath = Join-Path $shellPath 'LayoutModification.xml'
+    try {
+        $shellPath = Join-NyxPath -Base $SystemDriveRoot -Child 'Users\Default\AppData\Local\Microsoft\Windows\Shell'
+        New-Item -Path $shellPath -ItemType Directory -Force | Out-Null
+        $layoutPath = Join-Path $shellPath 'LayoutModification.xml'
 @'
 <?xml version="1.0" encoding="utf-8"?>
 <LayoutModificationTemplate
@@ -265,6 +275,10 @@ function Set-SystemBrandingAndLogon {
   </CustomTaskbarLayoutCollection>
 </LayoutModificationTemplate>
 '@ | Set-Content -LiteralPath $layoutPath -Encoding UTF8
+    }
+    catch {
+        Write-NyxLog "Layout padrão da taskbar ignorado: $($_.Exception.Message)" 'WARN'
+    }
 }
 
 function Download-Wallpapers {
@@ -602,24 +616,35 @@ try {
     Set-NyxState -Status 'BOOTSTRAP_STARTED'
     Write-NyxLog "Nyx Cloud standalone $Version iniciado."
 
+    $script:CurrentStage = 'environment'
     Assert-Environment
     if (-not $SkipTailscaleEnrollment) {
+        $script:CurrentStage = 'tailscale-input'
         Read-TailscaleEnrollmentInput
     }
     else {
         $script:TailscaleHostname = $ComputerName.ToLowerInvariant()
     }
+    $script:CurrentStage = 'system-branding'
     Set-SystemBrandingAndLogon
+    $script:CurrentStage = 'local-user'
     Ensure-NyxUser
+    $script:CurrentStage = 'wallpapers'
     Download-Wallpapers
+    $script:CurrentStage = 'autologon'
     Install-AndConfigureAutologon
 
+    $script:CurrentStage = 'applications'
     Install-Applications
     Set-NyxState -Status 'SOFTWARE_INSTALLED'
 
+    $script:CurrentStage = 'apollo'
     Configure-Apollo
+    $script:CurrentStage = 'tailscale-connect'
     Connect-Tailscale
+    $script:CurrentStage = 'user-profile-task'
     Register-NyxUserConfiguration
+    $script:CurrentStage = 'desktop-cleanup'
     Clear-PublicDesktopShortcuts
 
     Set-NyxState -Status 'AWAITING_USER_PROFILE'
@@ -645,7 +670,10 @@ try {
 catch {
     $script:TailscaleSecureKey = $null
     $safeMessage = $_.Exception.Message -replace 'tskey-[A-Za-z0-9_-]+', '[REDACTED]'
-    try { Set-NyxState -Status 'FAILED' -Detail $safeMessage } catch {}
-    try { Write-NyxLog $safeMessage 'ERROR' } catch { Write-Error $safeMessage }
+    $errorType = $_.Exception.GetType().FullName
+    $lineInfo = if ($_.InvocationInfo -and $_.InvocationInfo.ScriptLineNumber) { "linha $($_.InvocationInfo.ScriptLineNumber)" } else { 'linha desconhecida' }
+    $detail = "Etapa '$script:CurrentStage' falhou ($errorType, $lineInfo): $safeMessage"
+    try { Set-NyxState -Status 'FAILED' -Detail $detail } catch {}
+    try { Write-NyxLog $detail 'ERROR' } catch { Write-Error $detail }
     exit 1
 }
