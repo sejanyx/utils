@@ -1,3 +1,14 @@
+
+#requires -Version 5.1
+#requires -RunAsAdministrator
+
+[CmdletBinding()]
+param(
+    [switch]$SkipTailscaleEnrollment,
+    [switch]$SkipRestart,
+    [switch]$RepairApolloOnly
+)
+
 $WallpaperUrls = @(
     'https://raw.githubusercontent.com/sejanyx/utils/refs/heads/main/a.png',
     'https://raw.githubusercontent.com/sejanyx/utils/refs/heads/main/b.png',
@@ -7,22 +18,20 @@ $WallpaperUrls = @(
     'https://raw.githubusercontent.com/sejanyx/utils/refs/heads/main/g.png',
     'https://raw.githubusercontent.com/sejanyx/utils/refs/heads/main/h.png'
 )
-$SkipTailscaleEnrollment = $false
-$SkipRestart = $false
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$Version = '0.4.6-standalone'
+$Version = '0.4.4-standalone'
 $LocalUserName = 'nyx'
 $LocalUserPassword = 'nyxcloud'
 $ApolloDisplayName = 'nyxcloud'
 $ApolloUsername = 'nyx'
 $ApolloPassword = 'nyxcloud'
+$ApolloAdminPort = 47990
 $script:TailscaleHostname = $null
 $script:TailscaleSecureKey = $null
-$script:CurrentStage = 'startup'
 
 function Get-NyxRequiredValue {
     param(
@@ -30,7 +39,7 @@ function Get-NyxRequiredValue {
         [Parameter(Mandatory)] [string]$Name
     )
     if ([string]::IsNullOrWhiteSpace($Value)) {
-        throw "Valor obrigatório ausente: $Name."
+        throw "Valor obrigatÃ³rio ausente: $Name."
     }
     return $Value.Trim()
 }
@@ -54,7 +63,6 @@ if ([string]::IsNullOrWhiteSpace($ProgramFilesX86Root)) {
     $ProgramFilesX86Root = Join-NyxPath -Base $SystemDriveRoot -Child 'Program Files (x86)'
 }
 $TempRoot = Get-NyxRequiredValue -Value ([IO.Path]::GetTempPath()) -Name 'TEMP'
-$LocalAppDataRoot = Get-NyxRequiredValue -Value ([Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)) -Name 'LocalAppData'
 $ComputerName = Get-NyxRequiredValue -Value ([Environment]::MachineName) -Name 'ComputerName'
 
 $NyxRoot = Join-NyxPath -Base $ProgramDataRoot -Child 'Nyx'
@@ -101,7 +109,7 @@ function Set-NyxState {
 
 function Assert-Environment {
     if ($PSVersionTable.PSVersion -lt [version]'5.1') {
-        throw 'PowerShell 5.1 ou superior é necessário.'
+        throw 'PowerShell 5.1 ou superior Ã© necessÃ¡rio.'
     }
 
     if (-not [Environment]::Is64BitProcess) {
@@ -117,97 +125,36 @@ function Assert-Environment {
     $wingetCommand = Get-Command winget.exe -ErrorAction SilentlyContinue
     $script:Winget = if ($wingetCommand) { $wingetCommand.Source } else { $null }
     if ([string]::IsNullOrWhiteSpace($script:Winget) -or -not (Test-Path -LiteralPath $script:Winget -PathType Leaf)) {
-        throw 'WinGet não foi encontrado. Instale/atualize o App Installer da Microsoft antes de executar este script.'
+        throw 'WinGet nÃ£o foi encontrado. Instale/atualize o App Installer da Microsoft antes de executar este script.'
     }
 
-}
-
-function Invoke-NyxWithTemporaryPasswordPolicy {
-    param([Parameter(Mandatory)] [scriptblock]$Action)
-
-    $secedit = Join-NyxPath -Base $WindowsRoot -Child 'System32\secedit.exe'
-    if (-not (Test-Path -LiteralPath $secedit -PathType Leaf)) {
-        throw 'secedit.exe não foi encontrado.'
-    }
-
-    $policyRoot = Join-NyxPath -Base $TempRoot -Child ("nyx-policy-{0}" -f ([guid]::NewGuid().ToString('N')))
-    New-Item -Path $policyRoot -ItemType Directory -Force | Out-Null
-    $backupInf = Join-NyxPath -Base $policyRoot -Child 'original.inf'
-    $relaxedInf = Join-NyxPath -Base $policyRoot -Child 'temporary.inf'
-    $database = Join-NyxPath -Base $policyRoot -Child 'nyx.sdb'
-    $restoreDatabase = Join-NyxPath -Base $policyRoot -Child 'restore.sdb'
-    $restoreNeeded = $false
-
-    try {
-        $export = Start-Process -FilePath $secedit -ArgumentList @('/export','/cfg',"`"$backupInf`"",'/areas','SECURITYPOLICY','/quiet') -Wait -PassThru -WindowStyle Hidden
-        if ($export.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $backupInf -PathType Leaf)) {
-            throw "Não foi possível salvar a política de senha atual (secedit exit $($export.ExitCode))."
-        }
-
-        @"
-[Unicode]
-Unicode=yes
-[System Access]
-MinimumPasswordAge = 0
-MinimumPasswordLength = 0
-PasswordComplexity = 0
-PasswordHistorySize = 0
-[Version]
-signature="`$CHICAGO`$"
-Revision=1
-"@ | Set-Content -LiteralPath $relaxedInf -Encoding Unicode
-
-        $apply = Start-Process -FilePath $secedit -ArgumentList @('/configure','/db',"`"$database`"",'/cfg',"`"$relaxedInf`"",'/areas','SECURITYPOLICY','/quiet') -Wait -PassThru -WindowStyle Hidden
-        if ($apply.ExitCode -ne 0) {
-            throw "Não foi possível aplicar temporariamente a política necessária para a senha local (secedit exit $($apply.ExitCode))."
-        }
-        $restoreNeeded = $true
-
-        & $Action
-    }
-    finally {
-        if ($restoreNeeded -and (Test-Path -LiteralPath $backupInf -PathType Leaf)) {
-            try {
-                $restore = Start-Process -FilePath $secedit -ArgumentList @('/configure','/db',"`"$restoreDatabase`"",'/cfg',"`"$backupInf`"",'/areas','SECURITYPOLICY','/quiet') -Wait -PassThru -WindowStyle Hidden
-                if ($restore.ExitCode -ne 0) {
-                    Write-NyxLog "A política de senha original não pôde ser restaurada automaticamente (secedit exit $($restore.ExitCode))." 'WARN'
-                }
-            }
-            catch {
-                Write-NyxLog "Falha ao restaurar a política de senha original: $($_.Exception.Message)" 'WARN'
-            }
-        }
-        Remove-Item -LiteralPath $policyRoot -Recurse -Force -ErrorAction SilentlyContinue
-    }
 }
 
 function Ensure-NyxUser {
-    Invoke-NyxWithTemporaryPasswordPolicy -Action {
-        $securePassword = ConvertTo-SecureString -String $LocalUserPassword -AsPlainText -Force
-        $user = Get-LocalUser -Name $LocalUserName -ErrorAction SilentlyContinue
+    $securePassword = ConvertTo-SecureString -String $LocalUserPassword -AsPlainText -Force
+    $user = Get-LocalUser -Name $LocalUserName -ErrorAction SilentlyContinue
 
-        if (-not $user) {
-            New-LocalUser `
-                -Name $LocalUserName `
-                -Password $securePassword `
-                -AccountNeverExpires `
-                -PasswordNeverExpires `
-                -UserMayNotChangePassword `
-                -Description 'Nyx Cloud Gaming' | Out-Null
-            Write-NyxLog 'Usuário local nyx criado.'
+    if (-not $user) {
+        New-LocalUser `
+            -Name $LocalUserName `
+            -Password $securePassword `
+            -AccountNeverExpires `
+            -PasswordNeverExpires `
+            -UserMayNotChangePassword `
+            -Description 'Nyx Cloud Gaming' | Out-Null
+        Write-NyxLog 'UsuÃ¡rio local nyx criado.'
+    }
+    else {
+        if (-not $user.Enabled) {
+            Enable-LocalUser -Name $LocalUserName
         }
-        else {
-            if (-not $user.Enabled) {
-                Enable-LocalUser -Name $LocalUserName
-            }
-            Set-LocalUser -Name $LocalUserName -Password $securePassword -PasswordNeverExpires $true
-            Write-NyxLog 'Usuário local nyx já existia; senha e estado foram normalizados.'
-        }
+        Set-LocalUser -Name $LocalUserName -Password $securePassword -PasswordNeverExpires $true
+        Write-NyxLog 'UsuÃ¡rio local nyx jÃ¡ existia; senha e estado foram normalizados.'
     }
 
     $admins = Get-LocalGroup -SID 'S-1-5-32-544'
     Add-LocalGroupMember -Group $admins.Name -Member $LocalUserName -ErrorAction SilentlyContinue
-    Write-NyxLog 'Usuário nyx confirmado como administrador local.'
+    Write-NyxLog 'UsuÃ¡rio nyx confirmado como administrador local.'
 }
 
 function Install-WingetPackage {
@@ -219,11 +166,11 @@ function Install-WingetPackage {
 
     $validDetectionPaths = @($DetectionPaths | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
     if ($validDetectionPaths.Count -eq 0) {
-        throw "$Name não possui nenhum caminho de detecção válido."
+        throw "$Name nÃ£o possui nenhum caminho de detecÃ§Ã£o vÃ¡lido."
     }
 
     if ($validDetectionPaths | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }) {
-        Write-NyxLog "$Name já está instalado."
+        Write-NyxLog "$Name jÃ¡ estÃ¡ instalado."
         return
     }
 
@@ -234,24 +181,13 @@ function Install-WingetPackage {
         '--disable-interactivity', '--source', 'winget'
     )
     $process = Start-Process -FilePath $script:Winget -ArgumentList $args -Wait -PassThru -WindowStyle Hidden
-    $exitCode = [int]$process.ExitCode
-
-    if ($exitCode -eq -1978335189) {
-        Write-NyxLog "$Name já está instalado/atualizado; WinGet não encontrou atualização aplicável."
-        return
-    }
-
-    if ($exitCode -ne 0) {
-        if ($validDetectionPaths | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }) {
-            Write-NyxLog "$Name está presente apesar do WinGet retornar exit code $exitCode; continuando." 'WARN'
-            return
-        }
-        throw "$Name falhou no WinGet com exit code $exitCode."
+    if ($process.ExitCode -ne 0) {
+        throw "$Name falhou no WinGet com exit code $($process.ExitCode)."
     }
 
     Start-Sleep -Seconds 2
     if (-not ($validDetectionPaths | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })) {
-        throw "$Name terminou a instalação, mas o executável esperado não foi encontrado."
+        throw "$Name terminou a instalaÃ§Ã£o, mas o executÃ¡vel esperado nÃ£o foi encontrado."
     }
     Write-NyxLog "$Name instalado."
 }
@@ -263,8 +199,7 @@ function Install-Applications {
 
     Install-WingetPackage -Id 'Brave.Brave' -Name 'Brave' -DetectionPaths @(
         (Join-NyxPath -Base $ProgramFilesRoot -Child 'BraveSoftware\Brave-Browser\Application\brave.exe'),
-        (Join-NyxPath -Base $ProgramFilesX86Root -Child 'BraveSoftware\Brave-Browser\Application\brave.exe'),
-        (Join-NyxPath -Base $LocalAppDataRoot -Child 'BraveSoftware\Brave-Browser\Application\brave.exe')
+        (Join-NyxPath -Base $ProgramFilesX86Root -Child 'BraveSoftware\Brave-Browser\Application\brave.exe')
     )
 
     Install-WingetPackage -Id 'Tailscale.Tailscale' -Name 'Tailscale' -DetectionPaths @(
@@ -289,12 +224,12 @@ function Install-AndConfigureAutologon {
     }
 
     if (-not (Test-Path -LiteralPath $exePath -PathType Leaf)) {
-        throw 'Autologon64.exe não foi encontrado após a extração.'
+        throw 'Autologon64.exe nÃ£o foi encontrado apÃ³s a extraÃ§Ã£o.'
     }
 
     $signature = Get-AuthenticodeSignature -FilePath $exePath
     if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Microsoft') {
-        throw 'Assinatura do Sysinternals Autologon inválida ou inesperada.'
+        throw 'Assinatura do Sysinternals Autologon invÃ¡lida ou inesperada.'
     }
 
     $process = Start-Process -FilePath $exePath -ArgumentList @(
@@ -307,34 +242,23 @@ function Install-AndConfigureAutologon {
     if ($process.ExitCode -ne 0) {
         throw "Sysinternals Autologon falhou com exit code $($process.ExitCode)."
     }
-    Write-NyxLog 'Autologon do usuário nyx configurado por segredo LSA.'
+    Write-NyxLog 'Autologon do usuÃ¡rio nyx configurado por segredo LSA.'
 }
 
 function Set-SystemBrandingAndLogon {
-    try {
-        $oemPath = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\OEMInformation'
-        New-Item -Path $oemPath -Force | Out-Null
-        Set-ItemProperty -Path $oemPath -Name 'Model' -Value 'Nyx cloud' -Force
-    }
-    catch {
-        Write-NyxLog "OEM branding ignorado: $($_.Exception.Message)" 'WARN'
-    }
+    $oemPath = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\OEMInformation'
+    New-Item -Path $oemPath -Force | Out-Null
+    Set-ItemProperty -Path $oemPath -Name 'Model' -Value 'Nyx cloud' -Force
 
-    try {
-        $systemPolicy = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
-        New-Item -Path $systemPolicy -Force | Out-Null
-        New-ItemProperty -Path $systemPolicy -Name 'dontdisplaylastusername' -PropertyType DWord -Value 1 -Force | Out-Null
-        New-ItemProperty -Path $systemPolicy -Name 'DontDisplayLockedUserId' -PropertyType DWord -Value 3 -Force | Out-Null
-        New-ItemProperty -Path $systemPolicy -Name 'HideFastUserSwitching' -PropertyType DWord -Value 1 -Force | Out-Null
-    }
-    catch {
-        Write-NyxLog "Políticas visuais de logon ignoradas: $($_.Exception.Message)" 'WARN'
-    }
+    $systemPolicy = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
+    New-Item -Path $systemPolicy -Force | Out-Null
+    New-ItemProperty -Path $systemPolicy -Name 'dontdisplaylastusername' -PropertyType DWord -Value 1 -Force | Out-Null
+    New-ItemProperty -Path $systemPolicy -Name 'DontDisplayLockedUserId' -PropertyType DWord -Value 3 -Force | Out-Null
+    New-ItemProperty -Path $systemPolicy -Name 'HideFastUserSwitching' -PropertyType DWord -Value 1 -Force | Out-Null
 
-    try {
-        $shellPath = Join-NyxPath -Base $SystemDriveRoot -Child 'Users\Default\AppData\Local\Microsoft\Windows\Shell'
-        New-Item -Path $shellPath -ItemType Directory -Force | Out-Null
-        $layoutPath = Join-Path $shellPath 'LayoutModification.xml'
+    $shellPath = Join-NyxPath -Base $SystemDriveRoot -Child 'Users\Default\AppData\Local\Microsoft\Windows\Shell'
+    New-Item -Path $shellPath -ItemType Directory -Force | Out-Null
+    $layoutPath = Join-Path $shellPath 'LayoutModification.xml'
 @'
 <?xml version="1.0" encoding="utf-8"?>
 <LayoutModificationTemplate
@@ -349,10 +273,6 @@ function Set-SystemBrandingAndLogon {
   </CustomTaskbarLayoutCollection>
 </LayoutModificationTemplate>
 '@ | Set-Content -LiteralPath $layoutPath -Encoding UTF8
-    }
-    catch {
-        Write-NyxLog "Layout padrão da taskbar ignorado: $($_.Exception.Message)" 'WARN'
-    }
 }
 
 function Download-Wallpapers {
@@ -368,14 +288,14 @@ function Download-Wallpapers {
             $uri = [Uri]$url
             $fileName = [IO.Path]::GetFileName($uri.AbsolutePath)
             if (-not $fileName) {
-                throw 'URL de wallpaper sem nome de arquivo válido'
+                throw 'URL de wallpaper sem nome de arquivo vÃ¡lido'
             }
 
             $destination = Join-Path $WallpaperRoot $fileName
             Write-NyxLog "Baixando wallpaper $fileName..."
             Invoke-WebRequest -Uri $url -OutFile $destination -UseBasicParsing
             if ((Get-Item -LiteralPath $destination).Length -lt 1024) {
-                throw 'arquivo recebido é pequeno demais para ser o wallpaper esperado'
+                throw 'arquivo recebido Ã© pequeno demais para ser o wallpaper esperado'
             }
             $downloaded++
         }
@@ -388,7 +308,7 @@ function Download-Wallpapers {
     }
 
     if ($downloaded -eq 0) {
-        Write-NyxLog 'Nenhum wallpaper pôde ser baixado.' 'WARN'
+        Write-NyxLog 'Nenhum wallpaper pÃ´de ser baixado.' 'WARN'
     }
     else {
         Write-NyxLog "$downloaded wallpaper(s) preparado(s)."
@@ -398,44 +318,98 @@ function Download-Wallpapers {
 function Configure-Apollo {
     $apolloExecutable = Join-NyxPath -Base $ProgramFilesRoot -Child 'Apollo\sunshine.exe'
     $configPath = Join-NyxPath -Base $ProgramFilesRoot -Child 'Apollo\config\sunshine.conf'
+    $credentialsPath = Join-NyxPath -Base $ProgramFilesRoot -Child 'Apollo\config\sunshine_state.json'
     if (-not (Test-Path -LiteralPath $apolloExecutable -PathType Leaf)) {
-        throw 'Apollo não foi encontrado após a instalação.'
+        throw 'Apollo nÃ£o foi encontrado apÃ³s a instalaÃ§Ã£o.'
     }
 
-    $apolloServices = @(Get-CimInstance Win32_Service -ErrorAction SilentlyContinue | Where-Object { $_.PathName -match '\\Apollo\\sunshine\.exe' })
-    foreach ($service in $apolloServices) {
-        if ($service.State -eq 'Running') {
-            Stop-Service -Name $service.Name -Force -ErrorAction SilentlyContinue
+    $apolloServices = @(Get-CimInstance Win32_Service -ErrorAction SilentlyContinue | Where-Object {
+        $_.Name -eq 'SunshineService' -or
+        ($_.PathName -match '\\Apollo\\' -and $_.PathName -match '\\sunshine(?:svc)?\.exe(?:"|\s|$)')
+    })
+    if ($apolloServices.Count -eq 0) {
+        throw 'O serviÃ§o do Apollo nÃ£o foi encontrado apÃ³s a instalaÃ§Ã£o.'
+    }
+
+    try {
+        foreach ($service in $apolloServices) {
+            $windowsService = Get-Service -Name $service.Name -ErrorAction Stop
+            if ($windowsService.Status -ne 'Stopped') {
+                Stop-Service -Name $service.Name -Force -ErrorAction Stop
+                $windowsService.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
+            }
+        }
+
+        $configDir = Split-Path -Parent $configPath
+        New-Item -Path $configDir -ItemType Directory -Force | Out-Null
+
+        $existing = if (Test-Path -LiteralPath $configPath) { @(Get-Content -LiteralPath $configPath) } else { @() }
+        $managed = [ordered]@{
+            sunshine_name = $ApolloDisplayName
+            upnp = 'disabled'
+            headless_mode = 'enabled'
+            origin_web_ui_allowed = 'wan'
+        }
+        $remaining = @($existing | Where-Object {
+            $line = $_
+            -not ($managed.Keys | Where-Object { $line -match "^\s*$([regex]::Escape($_))\s*=" })
+        })
+        $configLines = @($remaining) + @($managed.GetEnumerator() | ForEach-Object { "$($_.Key) = $($_.Value)" })
+        $configLines | Set-Content -LiteralPath $configPath -Encoding UTF8
+
+        $apolloDirectory = Split-Path -Parent $apolloExecutable
+        $credentialProcess = Start-Process `
+            -FilePath $apolloExecutable `
+            -ArgumentList @('--creds', $ApolloUsername, $ApolloPassword) `
+            -WorkingDirectory $apolloDirectory `
+            -Wait `
+            -PassThru `
+            -WindowStyle Hidden
+        if ($credentialProcess.ExitCode -ne 0) {
+            throw "NÃ£o foi possÃ­vel configurar as credenciais do Apollo (exit code $($credentialProcess.ExitCode))."
+        }
+
+        if (-not (Test-Path -LiteralPath $credentialsPath -PathType Leaf)) {
+            throw 'O Apollo nÃ£o criou o arquivo de credenciais esperado.'
+        }
+        try {
+            $credentialState = Get-Content -LiteralPath $credentialsPath -Raw | ConvertFrom-Json
+        }
+        catch {
+            throw 'O Apollo criou um arquivo de credenciais invÃ¡lido.'
+        }
+        if (
+            [string]$credentialState.username -ne $ApolloUsername -or
+            [string]::IsNullOrWhiteSpace([string]$credentialState.password) -or
+            [string]::IsNullOrWhiteSpace([string]$credentialState.salt)
+        ) {
+            throw 'O Apollo nÃ£o persistiu as credenciais administrativas corretamente.'
         }
     }
-
-    $configDir = Split-Path -Parent $configPath
-    New-Item -Path $configDir -ItemType Directory -Force | Out-Null
-
-    $existing = if (Test-Path -LiteralPath $configPath) { @(Get-Content -LiteralPath $configPath) } else { @() }
-    $managed = [ordered]@{
-        sunshine_name = $ApolloDisplayName
-        upnp = 'disabled'
-        headless_mode = 'enabled'
-        origin_web_ui_allowed = 'wan'
-    }
-    $remaining = @($existing | Where-Object {
-        $line = $_
-        -not ($managed.Keys | Where-Object { $line -match "^\s*$([regex]::Escape($_))\s*=" })
-    })
-    $configLines = @($remaining) + @($managed.GetEnumerator() | ForEach-Object { "$($_.Key) = $($_.Value)" })
-    $configLines | Set-Content -LiteralPath $configPath -Encoding UTF8
-
-    & $apolloExecutable --creds $ApolloUsername $ApolloPassword *> $null
-    if ($LASTEXITCODE -ne 0) {
-        throw 'Não foi possível configurar as credenciais do Apollo.'
-    }
-
-    foreach ($service in $apolloServices) {
-        Set-Service -Name $service.Name -StartupType Automatic -ErrorAction SilentlyContinue
-        Start-Service -Name $service.Name -ErrorAction SilentlyContinue
+    finally {
+        foreach ($service in $apolloServices) {
+            Set-Service -Name $service.Name -StartupType Automatic -ErrorAction Stop
+            Start-Service -Name $service.Name -ErrorAction Stop
+            (Get-Service -Name $service.Name -ErrorAction Stop).WaitForStatus('Running', [TimeSpan]::FromSeconds(30))
+        }
     }
     Write-NyxLog 'Apollo configurado como nyxcloud com credenciais nyx / nyxcloud.'
+}
+
+function Set-ApolloFirewallRule {
+    $ruleName = 'Nyx-Apollo-Admin-Tailscale'
+    Get-NetFirewallRule -Name $ruleName -ErrorAction SilentlyContinue |
+        Remove-NetFirewallRule -ErrorAction SilentlyContinue
+    New-NetFirewallRule `
+        -Name $ruleName `
+        -DisplayName 'Nyx Apollo Admin (Tailscale)' `
+        -Direction Inbound `
+        -Action Allow `
+        -Protocol TCP `
+        -LocalPort $ApolloAdminPort `
+        -RemoteAddress '100.64.0.0/10' `
+        -Profile Any | Out-Null
+    Write-NyxLog "Firewall do Apollo liberado na porta $ApolloAdminPort somente para IPv4 da Tailnet."
 }
 
 function Read-TailscaleEnrollmentInput {
@@ -445,7 +419,7 @@ function Read-TailscaleEnrollmentInput {
             $hostnameInput = $ComputerName.ToLowerInvariant()
         }
         if ($hostnameInput -notmatch '^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$') {
-            Write-Host 'Hostname inválido. Use apenas letras, números e hífen.' -ForegroundColor Yellow
+            Write-Host 'Hostname invÃ¡lido. Use apenas letras, nÃºmeros e hÃ­fen.' -ForegroundColor Yellow
             $hostnameInput = $null
         }
     } while (-not $hostnameInput)
@@ -453,7 +427,7 @@ function Read-TailscaleEnrollmentInput {
     $script:TailscaleHostname = $hostnameInput.ToLowerInvariant()
     $script:TailscaleSecureKey = Read-Host 'Tailscale auth key' -AsSecureString
     if ($script:TailscaleSecureKey.Length -eq 0) {
-        throw 'A auth key do Tailscale não pode ficar vazia.'
+        throw 'A auth key do Tailscale nÃ£o pode ficar vazia.'
     }
 }
 
@@ -465,7 +439,7 @@ function Connect-Tailscale {
 
     $tailscale = Join-NyxPath -Base $ProgramFilesRoot -Child 'Tailscale\tailscale.exe'
     if (-not (Test-Path -LiteralPath $tailscale -PathType Leaf)) {
-        throw 'Tailscale não foi encontrado após a instalação.'
+        throw 'Tailscale nÃ£o foi encontrado apÃ³s a instalaÃ§Ã£o.'
     }
 
     $registered = $false
@@ -483,15 +457,15 @@ function Connect-Tailscale {
     if ($registered) {
         & $tailscale set "--hostname=$script:TailscaleHostname" *> $null
         if ($LASTEXITCODE -ne 0) {
-            throw 'Não foi possível atualizar o hostname do Tailscale.'
+            throw 'NÃ£o foi possÃ­vel atualizar o hostname do Tailscale.'
         }
         $script:TailscaleSecureKey = $null
-        Write-NyxLog 'Tailscale já estava registrado; hostname atualizado.'
+        Write-NyxLog 'Tailscale jÃ¡ estava registrado; hostname atualizado.'
         return
     }
 
     if (-not $script:TailscaleSecureKey -or $script:TailscaleSecureKey.Length -eq 0) {
-        throw 'A auth key do Tailscale não foi informada.'
+        throw 'A auth key do Tailscale nÃ£o foi informada.'
     }
 
     $keyFile = Join-NyxPath -Base $TempRoot -Child ("nyx-ts-{0}.key" -f ([guid]::NewGuid().ToString('N')))
@@ -500,17 +474,17 @@ function Connect-Tailscale {
         $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($script:TailscaleSecureKey)
         $plainKey = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
         if ([string]::IsNullOrWhiteSpace($plainKey)) {
-            throw 'A auth key do Tailscale resultou vazia após a leitura.'
+            throw 'A auth key do Tailscale resultou vazia apÃ³s a leitura.'
         }
         Set-Content -LiteralPath $keyFile -Value $plainKey -NoNewline -Encoding Ascii
         Remove-Variable plainKey -ErrorAction SilentlyContinue
         if (-not (Test-Path -LiteralPath $keyFile -PathType Leaf) -or (Get-Item -LiteralPath $keyFile).Length -le 0) {
-            throw 'Não foi possível preparar o arquivo temporário da auth key do Tailscale.'
+            throw 'NÃ£o foi possÃ­vel preparar o arquivo temporÃ¡rio da auth key do Tailscale.'
         }
 
         & $tailscale up "--auth-key=file:$keyFile" "--hostname=$script:TailscaleHostname" '--unattended=true' '--accept-routes=false' *> $null
         if ($LASTEXITCODE -ne 0) {
-            throw 'Falha ao registrar a máquina no Tailscale.'
+            throw 'Falha ao registrar a mÃ¡quina no Tailscale.'
         }
     }
     finally {
@@ -539,7 +513,7 @@ $expectedUser = 'nyx'
 if ($env:USERNAME -ine $expectedUser) { exit 0 }
 
 $programData = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
-if ([string]::IsNullOrWhiteSpace($programData)) { throw 'ProgramData indisponível.' }
+if ([string]::IsNullOrWhiteSpace($programData)) { throw 'ProgramData indisponÃ­vel.' }
 $nyxRoot = [IO.Path]::Combine($programData, 'Nyx')
 $wallpaperRoot = [IO.Path]::Combine($nyxRoot, 'Wallpapers')
 $userStateRoot = [IO.Path]::Combine($nyxRoot, 'UserState')
@@ -562,7 +536,7 @@ try {
         $pictures = [Environment]::GetFolderPath([Environment+SpecialFolder]::MyPictures)
         if ([string]::IsNullOrWhiteSpace($pictures)) {
             $userProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
-            if ([string]::IsNullOrWhiteSpace($userProfile)) { throw 'Perfil do usuário indisponível.' }
+            if ([string]::IsNullOrWhiteSpace($userProfile)) { throw 'Perfil do usuÃ¡rio indisponÃ­vel.' }
             $pictures = [IO.Path]::Combine($userProfile, 'Pictures')
         }
         $wallpaperDir = [IO.Path]::Combine($pictures, 'Nyx Wallpapers')
@@ -587,12 +561,12 @@ public static class NyxWallpaper {
 }
 "@
         if (-not [NyxWallpaper]::SystemParametersInfo(20, 0, $userWallpaper, 3)) {
-            throw 'O Windows não aceitou o wallpaper.'
+            throw 'O Windows nÃ£o aceitou o wallpaper.'
         }
         $wallpaperName = $selected.Name
     }
     else {
-        Write-UserLog 'Nenhum wallpaper foi encontrado; personalização continuará sem ele.'
+        Write-UserLog 'Nenhum wallpaper foi encontrado; personalizaÃ§Ã£o continuarÃ¡ sem ele.'
     }
 
     $desktop = [Environment]::GetFolderPath('Desktop')
@@ -603,7 +577,7 @@ public static class NyxWallpaper {
     }
 
     $localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
-    if ([string]::IsNullOrWhiteSpace($localAppData)) { throw 'LocalAppData indisponível.' }
+    if ([string]::IsNullOrWhiteSpace($localAppData)) { throw 'LocalAppData indisponÃ­vel.' }
     $layoutRoot = [IO.Path]::Combine($localAppData, 'Nyx')
     New-Item -Path $layoutRoot -ItemType Directory -Force | Out-Null
     $layoutPath = Join-Path $layoutRoot 'taskbar-layout.xml'
@@ -672,7 +646,7 @@ catch { exit 1 }
     $cleanupSettings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 5) -StartWhenAvailable
     Register-ScheduledTask -TaskName 'Nyx-CleanupUserTask' -Action $cleanupAction -Trigger $cleanupTrigger -Principal $cleanupPrincipal -Settings $cleanupSettings -Force | Out-Null
 
-    Write-NyxLog 'Personalização do primeiro logon do nyx registrada.'
+    Write-NyxLog 'PersonalizaÃ§Ã£o do primeiro logon do nyx registrada.'
 }
 
 function Clear-PublicDesktopShortcuts {
@@ -687,67 +661,63 @@ function Clear-PublicDesktopShortcuts {
 Initialize-NyxDirectories
 
 try {
-    Set-NyxState -Status 'BOOTSTRAP_STARTED'
     Write-NyxLog "Nyx Cloud standalone $Version iniciado."
-
-    $script:CurrentStage = 'environment'
     Assert-Environment
+
+    if ($RepairApolloOnly) {
+        Configure-Apollo
+        Set-ApolloFirewallRule
+        Write-NyxLog 'Reparo do Apollo concluÃ­do.'
+        Write-Host ''
+        Write-Host 'Apollo reparado com credenciais nyx / nyxcloud.'
+        exit 0
+    }
+
+    Set-NyxState -Status 'BOOTSTRAP_STARTED'
     if (-not $SkipTailscaleEnrollment) {
-        $script:CurrentStage = 'tailscale-input'
         Read-TailscaleEnrollmentInput
     }
     else {
         $script:TailscaleHostname = $ComputerName.ToLowerInvariant()
     }
-    $script:CurrentStage = 'system-branding'
     Set-SystemBrandingAndLogon
-    $script:CurrentStage = 'local-user'
     Ensure-NyxUser
-    $script:CurrentStage = 'wallpapers'
     Download-Wallpapers
-    $script:CurrentStage = 'autologon'
     Install-AndConfigureAutologon
 
-    $script:CurrentStage = 'applications'
     Install-Applications
     Set-NyxState -Status 'SOFTWARE_INSTALLED'
 
-    $script:CurrentStage = 'apollo'
     Configure-Apollo
-    $script:CurrentStage = 'tailscale-connect'
+    Set-ApolloFirewallRule
     Connect-Tailscale
-    $script:CurrentStage = 'user-profile-task'
     Register-NyxUserConfiguration
-    $script:CurrentStage = 'desktop-cleanup'
     Clear-PublicDesktopShortcuts
 
     Set-NyxState -Status 'AWAITING_USER_PROFILE'
-    Write-NyxLog 'Etapa administrativa concluída. O usuário nyx será configurado no próximo logon.'
+    Write-NyxLog 'Etapa administrativa concluÃ­da. O usuÃ¡rio nyx serÃ¡ configurado no prÃ³ximo logon.'
 
     if (-not $SkipRestart) {
-        Write-NyxLog 'Reiniciando a máquina em 30 segundos.'
-        shutdown.exe /r /t 30 /c 'Provisionamento Nyx concluído. Reiniciando para finalizar o perfil.' /d p:4:1 | Out-Null
+        Write-NyxLog 'Reiniciando a mÃ¡quina em 30 segundos.'
+        shutdown.exe /r /t 30 /c 'Provisionamento Nyx concluÃ­do. Reiniciando para finalizar o perfil.' /d p:4:1 | Out-Null
     }
     else {
-        Write-NyxLog 'Reinício automático ignorado por -SkipRestart.' 'WARN'
+        Write-NyxLog 'ReinÃ­cio automÃ¡tico ignorado por -SkipRestart.' 'WARN'
     }
 
     Write-Host ''
-    Write-Host 'Nyx Cloud: etapa administrativa concluída.'
-    Write-Host 'Usuário local: nyx'
+    Write-Host 'Nyx Cloud: etapa administrativa concluÃ­da.'
+    Write-Host 'UsuÃ¡rio local: nyx'
     Write-Host 'Senha: nyxcloud'
     if ($SkipRestart) {
-        Write-Host 'Reinicie a máquina manualmente para concluir o autologon e o wallpaper.'
+        Write-Host 'Reinicie a mÃ¡quina manualmente para concluir o autologon e o wallpaper.'
     }
     exit 0
 }
 catch {
     $script:TailscaleSecureKey = $null
     $safeMessage = $_.Exception.Message -replace 'tskey-[A-Za-z0-9_-]+', '[REDACTED]'
-    $errorType = $_.Exception.GetType().FullName
-    $lineInfo = if ($_.InvocationInfo -and $_.InvocationInfo.ScriptLineNumber) { "linha $($_.InvocationInfo.ScriptLineNumber)" } else { 'linha desconhecida' }
-    $detail = "Etapa '$script:CurrentStage' falhou ($errorType, $lineInfo): $safeMessage"
-    try { Set-NyxState -Status 'FAILED' -Detail $detail } catch {}
-    try { Write-NyxLog $detail 'ERROR' } catch { Write-Error $detail }
+    try { Set-NyxState -Status 'FAILED' -Detail $safeMessage } catch {}
+    try { Write-NyxLog $safeMessage 'ERROR' } catch { Write-Error $safeMessage }
     exit 1
 }
