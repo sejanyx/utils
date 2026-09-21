@@ -6,6 +6,7 @@
 param(
     [switch]$SkipTailscaleEnrollment,
     [switch]$SkipRestart,
+    [switch]$SkipRestorePoint,
     [switch]$RepairApolloOnly
 )
 
@@ -23,7 +24,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$Version = '0.4.5-standalone'
+$Version = '0.4.6-standalone'
 $LocalUserName = 'nyx'
 $LocalUserPassword = 'nyxcloud'
 $ApolloDisplayName = 'nyxcloud'
@@ -659,6 +660,32 @@ function Clear-PublicDesktopShortcuts {
     }
 }
 
+function New-NyxProvisioningRestorePoint {
+    if ($SkipRestorePoint) {
+        Write-NyxLog 'Criação do ponto de restauração ignorada por -SkipRestorePoint.' 'WARN'
+        return
+    }
+
+    try {
+        $operatingSystem = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+        if ([int]$operatingSystem.ProductType -ne 1) {
+            Write-NyxLog 'Ponto de restauração indisponível nesta edição do Windows; etapa ignorada.' 'WARN'
+            return
+        }
+
+        Enable-ComputerRestore -Drive $SystemDriveRoot -ErrorAction Stop
+        $description = "Nyx Cloud $Version - provisionamento concluído"
+        Checkpoint-Computer `
+            -Description $description `
+            -RestorePointType 'MODIFY_SETTINGS' `
+            -ErrorAction Stop
+        Write-NyxLog "Ponto de restauração criado: $description."
+    }
+    catch {
+        Write-NyxLog "Não foi possível criar o ponto de restauração; o provisionamento seguirá normalmente: $($_.Exception.Message)" 'WARN'
+    }
+}
+
 Initialize-NyxDirectories
 
 try {
@@ -694,6 +721,7 @@ try {
     Connect-Tailscale
     Register-NyxUserConfiguration
     Clear-PublicDesktopShortcuts
+    New-NyxProvisioningRestorePoint
 
     Set-NyxState -Status 'AWAITING_USER_PROFILE'
     Write-NyxLog 'Etapa administrativa concluída. O usuário nyx será configurado no próximo logon.'
