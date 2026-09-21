@@ -6,7 +6,7 @@
 param(
     [switch]$SkipTailscaleEnrollment,
     [switch]$SkipRestart,
-    [switch]$SkipRestorePoint,
+    [switch]$CreateRestorePoint,
     [switch]$RepairApolloOnly
 )
 
@@ -24,7 +24,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$Version = '0.4.6-standalone'
+$Version = '0.4.7-standalone'
 $LocalUserName = 'nyx'
 $LocalUserPassword = 'nyxcloud'
 $ApolloDisplayName = 'nyxcloud'
@@ -661,11 +661,6 @@ function Clear-PublicDesktopShortcuts {
 }
 
 function New-NyxProvisioningRestorePoint {
-    if ($SkipRestorePoint) {
-        Write-NyxLog 'Criação do ponto de restauração ignorada por -SkipRestorePoint.' 'WARN'
-        return
-    }
-
     try {
         $operatingSystem = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
         if ([int]$operatingSystem.ProductType -ne 1) {
@@ -721,7 +716,9 @@ try {
     Connect-Tailscale
     Register-NyxUserConfiguration
     Clear-PublicDesktopShortcuts
-    New-NyxProvisioningRestorePoint
+    if ($CreateRestorePoint) {
+        New-NyxProvisioningRestorePoint
+    }
 
     Set-NyxState -Status 'AWAITING_USER_PROFILE'
     Write-NyxLog 'Etapa administrativa concluída. O usuário nyx será configurado no próximo logon.'
