@@ -24,7 +24,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$Version = '0.4.7-standalone'
+$Version = '0.4.8-standalone'
 $LocalUserName = 'nyx'
 $LocalUserPassword = 'nyxcloud'
 $ApolloDisplayName = 'nyxcloud'
@@ -131,26 +131,82 @@ function Assert-Environment {
 
 }
 
+function Set-NyxLocalPasswordPolicy {
+    $secedit = Join-NyxPath -Base $WindowsRoot -Child 'System32\secedit.exe'
+    if (-not (Test-Path -LiteralPath $secedit -PathType Leaf)) {
+        throw 'secedit.exe não foi encontrado; não foi possível ajustar a política de senha local.'
+    }
+
+    $operationId = [guid]::NewGuid().ToString('N')
+    $templatePath = Join-NyxPath -Base $TempRoot -Child "nyx-password-policy-$operationId.inf"
+    $databasePath = Join-NyxPath -Base $TempRoot -Child "nyx-password-policy-$operationId.sdb"
+    $databaseJfmPaths = @("$databasePath.jfm", [IO.Path]::ChangeExtension($databasePath, '.jfm'))
+    $logPath = Join-NyxPath -Base $TempRoot -Child "nyx-password-policy-$operationId.log"
+
+    try {
+@'
+[Unicode]
+Unicode=yes
+[System Access]
+MinimumPasswordAge = 0
+MinimumPasswordLength = 8
+PasswordComplexity = 0
+PasswordHistorySize = 0
+[Version]
+signature="$CHICAGO$"
+Revision=1
+'@ | Set-Content -LiteralPath $templatePath -Encoding Unicode
+
+        & $secedit `
+            /configure `
+            /db $databasePath `
+            /cfg $templatePath `
+            /overwrite `
+            /areas SECURITYPOLICY `
+            /log $logPath `
+            /quiet | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "secedit falhou com exit code $LASTEXITCODE."
+        }
+
+        Write-NyxLog 'Política de senha local ajustada para permitir a senha operacional do usuário nyx.'
+    }
+    finally {
+        Remove-Item -LiteralPath $templatePath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $databasePath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $databaseJfmPaths -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $logPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Ensure-NyxUser {
     $securePassword = ConvertTo-SecureString -String $LocalUserPassword -AsPlainText -Force
     $user = Get-LocalUser -Name $LocalUserName -ErrorAction SilentlyContinue
 
-    if (-not $user) {
-        New-LocalUser `
-            -Name $LocalUserName `
-            -Password $securePassword `
-            -AccountNeverExpires `
-            -PasswordNeverExpires `
-            -UserMayNotChangePassword `
-            -Description 'Nyx Cloud Gaming' | Out-Null
-        Write-NyxLog 'Usuário local nyx criado.'
-    }
-    else {
-        if (-not $user.Enabled) {
-            Enable-LocalUser -Name $LocalUserName
+    try {
+        if (-not $user) {
+            New-LocalUser `
+                -Name $LocalUserName `
+                -Password $securePassword `
+                -AccountNeverExpires `
+                -PasswordNeverExpires `
+                -UserMayNotChangePassword `
+                -Description 'Nyx Cloud Gaming' | Out-Null
+            Write-NyxLog 'Usuário local nyx criado.'
         }
-        Set-LocalUser -Name $LocalUserName -Password $securePassword -PasswordNeverExpires $true
-        Write-NyxLog 'Usuário local nyx já existia; senha e estado foram normalizados.'
+        else {
+            if (-not $user.Enabled) {
+                Enable-LocalUser -Name $LocalUserName
+            }
+            Set-LocalUser -Name $LocalUserName -Password $securePassword -PasswordNeverExpires $true
+            Write-NyxLog 'Usuário local nyx já existia; senha e estado foram normalizados.'
+        }
+    }
+    catch {
+        if ($_.Exception.GetType().FullName -eq 'Microsoft.PowerShell.Commands.InvalidPasswordException') {
+            throw 'A política aplicada à máquina ainda recusou a senha nyxcloud. Verifique se uma política do Intune ou Entra está impondo requisitos de senha após o ajuste local.'
+        }
+        throw
     }
 
     $admins = Get-LocalGroup -SID 'S-1-5-32-544'
@@ -704,6 +760,7 @@ try {
         $script:TailscaleHostname = $ComputerName.ToLowerInvariant()
     }
     Set-SystemBrandingAndLogon
+    Set-NyxLocalPasswordPolicy
     Ensure-NyxUser
     Download-Wallpapers
     Install-AndConfigureAutologon
