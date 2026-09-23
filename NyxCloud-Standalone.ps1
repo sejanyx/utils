@@ -25,7 +25,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$Version = '0.4.10-standalone'
+$Version = '0.4.11-standalone'
 $LocalUserName = 'nyx'
 $LocalUserPassword = 'nyxcloud'
 $ApolloDisplayName = 'nyxcloud'
@@ -601,56 +601,79 @@ function Write-UserLog([string]$Message) {
 }
 
 try {
-    $wallpaperName = $null
-    $sourceWallpapers = @()
-    if (Test-Path -LiteralPath $wallpaperRoot -PathType Container) {
-        $sourceWallpapers = @(Get-ChildItem -LiteralPath $wallpaperRoot -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.Extension -in @('.png','.jpg','.jpeg','.bmp') })
-    }
-
-    if ($sourceWallpapers.Count -gt 0) {
-        $pictures = [Environment]::GetFolderPath([Environment+SpecialFolder]::MyPictures)
-        if ([string]::IsNullOrWhiteSpace($pictures)) {
-            $userProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
-            if ([string]::IsNullOrWhiteSpace($userProfile)) { throw 'Perfil do usuário indisponível.' }
-            $pictures = [IO.Path]::Combine($userProfile, 'Pictures')
-        }
-        $wallpaperDir = [IO.Path]::Combine($pictures, 'Nyx Wallpapers')
-        New-Item -Path $wallpaperDir -ItemType Directory -Force | Out-Null
-
-        foreach ($source in $sourceWallpapers) {
-            Copy-Item -LiteralPath $source.FullName -Destination (Join-Path $wallpaperDir $source.Name) -Force
-        }
-
-        $selected = $sourceWallpapers | Get-Random
-        $userWallpaper = Join-Path $wallpaperDir $selected.Name
-
-        $desktopKey = 'HKCU:\Control Panel\Desktop'
-        Set-ItemProperty -Path $desktopKey -Name WallpaperStyle -Value '10'
-        Set-ItemProperty -Path $desktopKey -Name TileWallpaper -Value '0'
-
-        Add-Type @"
-using System.Runtime.InteropServices;
-public static class NyxWallpaper {
-    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    public static extern bool SystemParametersInfo(int action, int param, string value, int flags);
-}
-"@
-        if (-not [NyxWallpaper]::SystemParametersInfo(20, 0, $userWallpaper, 3)) {
-            throw 'O Windows não aceitou o wallpaper.'
-        }
-        $wallpaperName = $selected.Name
+    Write-UserLog 'Iniciando personalização do perfil nyx.'
+    $currentSessionId = [Diagnostics.Process]::GetCurrentProcess().SessionId
+    $explorerDeadline = (Get-Date).AddMinutes(2)
+    do {
+        $explorerProcesses = @(Get-Process explorer -ErrorAction SilentlyContinue |
+            Where-Object { $_.SessionId -eq $currentSessionId })
+        if ($explorerProcesses.Count -gt 0) { break }
+        Start-Sleep -Seconds 2
+    } while ((Get-Date) -lt $explorerDeadline)
+    if ($explorerProcesses.Count -eq 0) {
+        Write-UserLog 'Explorer não foi detectado; a personalização continuará mesmo assim.'
     }
     else {
-        Write-UserLog 'Nenhum wallpaper foi encontrado; personalização continuará sem ele.'
+        Start-Sleep -Seconds 5
     }
 
-    $desktop = [Environment]::GetFolderPath('Desktop')
-    if ($desktop -and (Test-Path -LiteralPath $desktop)) {
-        Get-ChildItem -LiteralPath $desktop -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.Extension -in @('.lnk','.url') } |
-            Remove-Item -Force -ErrorAction SilentlyContinue
+    Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class NyxAppearance {
+    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern bool SystemParametersInfo(int action, int param, string value, int flags);
+
+    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern IntPtr SendMessageTimeout(
+        IntPtr window, uint message, UIntPtr wParam, string lParam,
+        uint flags, uint timeout, out UIntPtr result);
+
+    [DllImport("shell32.dll")]
+    public static extern void SHChangeNotify(long eventId, uint flags, IntPtr item1, IntPtr item2);
+}
+"@
+
+    $personalizeKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'
+    New-Item -Path $personalizeKey -Force | Out-Null
+    New-ItemProperty -Path $personalizeKey -Name 'AppsUseLightTheme' -PropertyType DWord -Value 0 -Force | Out-Null
+    New-ItemProperty -Path $personalizeKey -Name 'SystemUsesLightTheme' -PropertyType DWord -Value 0 -Force | Out-Null
+    New-ItemProperty -Path $personalizeKey -Name 'EnableTransparency' -PropertyType DWord -Value 1 -Force | Out-Null
+    [UIntPtr]$broadcastResult = [UIntPtr]::Zero
+    [void][NyxAppearance]::SendMessageTimeout(
+        [IntPtr]0xffff, 0x001A, [UIntPtr]::Zero, 'ImmersiveColorSet', 2, 5000, [ref]$broadcastResult)
+    Write-UserLog 'Tema escuro aplicado ao Windows e aos aplicativos.'
+
+    $desktopPaths = @(
+        [Environment]::GetFolderPath('Desktop'),
+        [Environment]::GetFolderPath('CommonDesktopDirectory')
+    ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique
+    foreach ($desktopPath in $desktopPaths) {
+        if (Test-Path -LiteralPath $desktopPath -PathType Container) {
+            Get-ChildItem -LiteralPath $desktopPath -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.Extension -in @('.lnk','.url') } |
+                Remove-Item -Force -ErrorAction SilentlyContinue
+        }
     }
+
+    $desktopIconIds = @(
+        '{20D04FE0-3AEA-1069-A2D8-08002B30309D}',
+        '{5399E694-6CE5-4D6C-8FCE-1D8870FDCBA0}',
+        '{59031A47-3F72-44A7-89C5-5595FE6B30EE}',
+        '{645FF040-5081-101B-9F08-00AA002F954E}',
+        '{F02C1A0D-BE21-4350-88B0-7367FC96EF3C}'
+    )
+    foreach ($iconKey in @(
+        'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\NewStartPanel',
+        'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\ClassicStartMenu'
+    )) {
+        New-Item -Path $iconKey -Force | Out-Null
+        foreach ($iconId in $desktopIconIds) {
+            New-ItemProperty -Path $iconKey -Name $iconId -PropertyType DWord -Value 1 -Force | Out-Null
+        }
+    }
+    [NyxAppearance]::SHChangeNotify(0x08000000, 0, [IntPtr]::Zero, [IntPtr]::Zero)
+    Write-UserLog 'Atalhos e ícones padrão da área de trabalho removidos ou ocultados.'
 
     $localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
     if ([string]::IsNullOrWhiteSpace($localAppData)) { throw 'LocalAppData indisponível.' }
@@ -675,6 +698,62 @@ public static class NyxWallpaper {
     $explorerPolicy = 'HKCU:\Software\Policies\Microsoft\Windows\Explorer'
     New-Item -Path $explorerPolicy -Force | Out-Null
     New-ItemProperty -Path $explorerPolicy -Name 'StartLayoutFile' -PropertyType String -Value $layoutPath -Force | Out-Null
+
+    $wallpaperName = $null
+    $sourceWallpapers = @()
+    if (Test-Path -LiteralPath $wallpaperRoot -PathType Container) {
+        $sourceWallpapers = @(Get-ChildItem -LiteralPath $wallpaperRoot -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Extension -in @('.png','.jpg','.jpeg','.bmp') })
+    }
+
+    if ($sourceWallpapers.Count -gt 0) {
+        $pictures = [Environment]::GetFolderPath([Environment+SpecialFolder]::MyPictures)
+        if ([string]::IsNullOrWhiteSpace($pictures)) {
+            $userProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+            if ([string]::IsNullOrWhiteSpace($userProfile)) { throw 'Perfil do usuário indisponível.' }
+            $pictures = [IO.Path]::Combine($userProfile, 'Pictures')
+        }
+        $wallpaperDir = [IO.Path]::Combine($pictures, 'Nyx Wallpapers')
+        New-Item -Path $wallpaperDir -ItemType Directory -Force | Out-Null
+
+        foreach ($source in $sourceWallpapers) {
+            Copy-Item -LiteralPath $source.FullName -Destination (Join-Path $wallpaperDir $source.Name) -Force
+        }
+
+        $selected = $sourceWallpapers | Get-Random
+        $userWallpaper = Join-Path $wallpaperDir 'NyxCurrentWallpaper.bmp'
+        Remove-Item -LiteralPath $userWallpaper -Force -ErrorAction SilentlyContinue
+        Add-Type -AssemblyName System.Drawing
+        $sourceImage = [Drawing.Image]::FromFile($selected.FullName)
+        try {
+            $sourceImage.Save($userWallpaper, [Drawing.Imaging.ImageFormat]::Bmp)
+        }
+        finally {
+            $sourceImage.Dispose()
+        }
+
+        $desktopKey = 'HKCU:\Control Panel\Desktop'
+        Set-ItemProperty -Path $desktopKey -Name Wallpaper -Value $userWallpaper
+        Set-ItemProperty -Path $desktopKey -Name WallpaperStyle -Value '10'
+        Set-ItemProperty -Path $desktopKey -Name TileWallpaper -Value '0'
+
+        $wallpaperApplied = $false
+        for ($attempt = 1; $attempt -le 3; $attempt++) {
+            if ([NyxAppearance]::SystemParametersInfo(20, 0, $userWallpaper, 3)) {
+                $wallpaperApplied = $true
+                break
+            }
+            Start-Sleep -Seconds 3
+        }
+        if (-not $wallpaperApplied) {
+            throw 'O Windows não aceitou o wallpaper.'
+        }
+        $wallpaperName = $selected.Name
+        Write-UserLog "Wallpaper aplicado a partir de $wallpaperName."
+    }
+    else {
+        Write-UserLog 'Nenhum wallpaper foi encontrado; personalização continuará sem ele.'
+    }
 
     [ordered]@{
         status = 'READY'
@@ -711,6 +790,7 @@ catch { exit 1 }
 
     $userAction = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$configScript`""
     $userTrigger = New-ScheduledTaskTrigger -AtLogOn -User $user.SID.Value
+    $userTrigger.Delay = 'PT30S'
     $userPrincipal = New-ScheduledTaskPrincipal -UserId $user.SID.Value -LogonType Interactive -RunLevel Limited
     $userSettings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 10) -StartWhenAvailable
     Register-ScheduledTask -TaskName 'Nyx-ConfigureUser' -Action $userAction -Trigger $userTrigger -Principal $userPrincipal -Settings $userSettings -Force | Out-Null
