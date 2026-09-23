@@ -7,6 +7,7 @@ param(
     [switch]$SkipTailscaleEnrollment,
     [switch]$SkipRestart,
     [switch]$CreateRestorePoint,
+    [switch]$KeepPowerShellHistory,
     [switch]$RepairApolloOnly
 )
 
@@ -24,7 +25,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$Version = '0.4.8-standalone'
+$Version = '0.4.9-standalone'
 $LocalUserName = 'nyx'
 $LocalUserPassword = 'nyxcloud'
 $ApolloDisplayName = 'nyxcloud'
@@ -737,6 +738,63 @@ function New-NyxProvisioningRestorePoint {
     }
 }
 
+function Clear-NyxPowerShellHistory {
+    if ($KeepPowerShellHistory) {
+        Write-NyxLog 'Histórico do PowerShell preservado por -KeepPowerShellHistory.' 'WARN'
+        return
+    }
+
+    $historyPaths = @()
+    try {
+        $psReadLineOption = Get-PSReadLineOption -ErrorAction Stop
+        if (-not [string]::IsNullOrWhiteSpace([string]$psReadLineOption.HistorySavePath)) {
+            $historyPaths += [string]$psReadLineOption.HistorySavePath
+        }
+        Set-PSReadLineOption -HistorySaveStyle SaveNothing -ErrorAction Stop
+        try {
+            [Microsoft.PowerShell.PSConsoleReadLine]::ClearHistory()
+        }
+        catch {}
+    }
+    catch {
+        Write-NyxLog "PSReadLine não pôde ser controlado diretamente; os arquivos conhecidos ainda serão removidos: $($_.Exception.Message)" 'WARN'
+    }
+
+    Clear-History -ErrorAction SilentlyContinue
+
+    $applicationData = [Environment]::GetFolderPath([Environment+SpecialFolder]::ApplicationData)
+    if (-not [string]::IsNullOrWhiteSpace($applicationData)) {
+        $historyDirectories = @(
+            (Join-NyxPath -Base $applicationData -Child 'Microsoft\Windows\PowerShell\PSReadLine'),
+            (Join-NyxPath -Base $applicationData -Child 'Microsoft\PowerShell\PSReadLine')
+        )
+        foreach ($directory in $historyDirectories) {
+            if (Test-Path -LiteralPath $directory -PathType Container) {
+                $historyPaths += @(Get-ChildItem -LiteralPath $directory -File -Filter '*_history.txt' -ErrorAction SilentlyContinue |
+                    ForEach-Object { $_.FullName })
+            }
+        }
+    }
+
+    $failedPaths = @()
+    foreach ($historyPath in @($historyPaths | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique)) {
+        try {
+            Remove-Item -LiteralPath $historyPath -Force -ErrorAction Stop
+        }
+        catch [System.Management.Automation.ItemNotFoundException] {}
+        catch {
+            $failedPaths += $historyPath
+        }
+    }
+
+    if ($failedPaths.Count -gt 0) {
+        Write-NyxLog "Alguns arquivos de histórico do PowerShell não puderam ser removidos: $($failedPaths -join ', ')" 'WARN'
+    }
+    else {
+        Write-NyxLog 'Histórico da sessão e arquivos do PSReadLine removidos para o usuário executor.'
+    }
+}
+
 Initialize-NyxDirectories
 
 try {
@@ -747,6 +805,7 @@ try {
         Configure-Apollo
         Set-ApolloFirewallRule
         Write-NyxLog 'Reparo do Apollo concluído.'
+        try { Clear-NyxPowerShellHistory } catch { Write-NyxLog "Falha ao limpar o histórico do PowerShell: $($_.Exception.Message)" 'WARN' }
         Write-Host ''
         Write-Host 'Apollo reparado com credenciais nyx / nyxcloud.'
         exit 0
@@ -795,6 +854,7 @@ try {
     if ($SkipRestart) {
         Write-Host 'Reinicie a máquina manualmente para concluir o autologon e o wallpaper.'
     }
+    try { Clear-NyxPowerShellHistory } catch { Write-NyxLog "Falha ao limpar o histórico do PowerShell: $($_.Exception.Message)" 'WARN' }
     exit 0
 }
 catch {
