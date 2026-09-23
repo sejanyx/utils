@@ -25,7 +25,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$Version = '0.4.9-standalone'
+$Version = '0.4.10-standalone'
 $LocalUserName = 'nyx'
 $LocalUserPassword = 'nyxcloud'
 $ApolloDisplayName = 'nyxcloud'
@@ -219,7 +219,9 @@ function Install-WingetPackage {
     param(
         [Parameter(Mandatory)] [string]$Id,
         [Parameter(Mandatory)] [string]$Name,
-        [Parameter(Mandatory)] [string[]]$DetectionPaths
+        [Parameter(Mandatory)] [string[]]$DetectionPaths,
+        [ValidateSet('user','machine')] [string]$Scope,
+        [switch]$Force
     )
 
     $validDetectionPaths = @($DetectionPaths | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
@@ -238,16 +240,31 @@ function Install-WingetPackage {
         '--accept-source-agreements', '--accept-package-agreements',
         '--disable-interactivity', '--source', 'winget'
     )
+    if (-not [string]::IsNullOrWhiteSpace($Scope)) {
+        $args += @('--scope', $Scope)
+    }
+    if ($Force) {
+        $args += '--force'
+    }
     $process = Start-Process -FilePath $script:Winget -ArgumentList $args -Wait -PassThru -WindowStyle Hidden
     if ($process.ExitCode -ne 0) {
         throw "$Name falhou no WinGet com exit code $($process.ExitCode)."
     }
 
-    Start-Sleep -Seconds 2
-    if (-not ($validDetectionPaths | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })) {
+    $detectedPath = $null
+    $detectionDeadline = [DateTime]::UtcNow.AddSeconds(30)
+    do {
+        $detectedPath = @($validDetectionPaths | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1)
+        if ($detectedPath.Count -gt 0) {
+            break
+        }
+        Start-Sleep -Seconds 2
+    } while ([DateTime]::UtcNow -lt $detectionDeadline)
+
+    if ($detectedPath.Count -eq 0) {
         throw "$Name terminou a instalação, mas o executável esperado não foi encontrado."
     }
-    Write-NyxLog "$Name instalado."
+    Write-NyxLog "$Name instalado em $($detectedPath[0])."
 }
 
 function Install-Applications {
@@ -258,7 +275,7 @@ function Install-Applications {
     Install-WingetPackage -Id 'Brave.Brave' -Name 'Brave' -DetectionPaths @(
         (Join-NyxPath -Base $ProgramFilesRoot -Child 'BraveSoftware\Brave-Browser\Application\brave.exe'),
         (Join-NyxPath -Base $ProgramFilesX86Root -Child 'BraveSoftware\Brave-Browser\Application\brave.exe')
-    )
+    ) -Scope machine -Force
 
     Install-WingetPackage -Id 'Tailscale.Tailscale' -Name 'Tailscale' -DetectionPaths @(
         (Join-NyxPath -Base $ProgramFilesRoot -Child 'Tailscale\tailscale.exe')
