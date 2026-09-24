@@ -26,7 +26,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$Version = '0.4.13-standalone'
+$Version = '0.4.14-standalone'
 $LocalUserName = 'nyx'
 $LocalUserPassword = 'nyxcloud'
 $ApolloDisplayName = 'nyxcloud'
@@ -800,20 +800,101 @@ catch {
 }
 '@ | Set-Content -LiteralPath $configScript -Encoding UTF8
 
-@'
+$createRestorePointLiteral = if ($SkipRestorePoint) { '$false' } else { '$true' }
+$restorePointDescription = "Nyx Cloud $Version - provisionamento concluído"
+
+$cleanupScriptContent = @'
 $programData = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
 if ([string]::IsNullOrWhiteSpace($programData)) { exit 1 }
-$markerPath = [IO.Path]::Combine($programData, 'Nyx\UserState\user-profile-ready.json')
-if (-not (Test-Path -LiteralPath $markerPath -PathType Leaf)) { exit 0 }
+$userStateRoot = [IO.Path]::Combine($programData, 'Nyx\UserState')
+$markerPath = [IO.Path]::Combine($userStateRoot, 'user-profile-ready.json')
+$logPath = [IO.Path]::Combine($userStateRoot, 'user-configuration.log')
+$createRestorePoint = __CREATE_RESTORE_POINT__
+$restorePointDescription = '__RESTORE_POINT_DESCRIPTION__'
+
+function Write-CleanupLog([string]$Message) {
+    Add-Content -LiteralPath $logPath -Value ('{0:o} {1}' -f (Get-Date), $Message) -Encoding UTF8
+}
+
 try {
-    $state = Get-Content -LiteralPath $markerPath -Raw | ConvertFrom-Json
-    if ($state.status -ne 'READY') { exit 0 }
+    $profileReady = $false
+    $deadline = (Get-Date).AddMinutes(10)
+    do {
+        if (Test-Path -LiteralPath $markerPath -PathType Leaf) {
+            $state = Get-Content -LiteralPath $markerPath -Raw | ConvertFrom-Json
+            if ($state.status -eq 'READY') {
+                $profileReady = $true
+                break
+            }
+        }
+        Start-Sleep -Seconds 5
+    } while ((Get-Date) -lt $deadline)
+
+    if (-not $profileReady) {
+        Write-CleanupLog 'O perfil nyx não ficou pronto a tempo; o acabamento será tentado novamente no próximo logon.'
+        exit 1
+    }
+
+    if ($createRestorePoint) {
+        try {
+            $operatingSystem = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+            if ([int]$operatingSystem.ProductType -ne 1) {
+                Write-CleanupLog 'Ponto de restauração indisponível nesta edição do Windows; etapa ignorada.'
+            }
+            else {
+                $windowsRoot = [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)
+                $systemDriveRoot = [IO.Path]::GetPathRoot($windowsRoot)
+                Enable-ComputerRestore -Drive $systemDriveRoot -ErrorAction Stop
+
+                $frequencyPath = 'HKLM:\Software\Microsoft\Windows NT\CurrentVersion\SystemRestore'
+                $frequencyName = 'SystemRestorePointCreationFrequency'
+                $frequencyExisted = $false
+                $previousFrequency = $null
+                $frequencyProperties = Get-ItemProperty -Path $frequencyPath -ErrorAction SilentlyContinue
+                if ($null -ne $frequencyProperties) {
+                    $frequencyProperty = $frequencyProperties.PSObject.Properties[$frequencyName]
+                    if ($null -ne $frequencyProperty) {
+                        $frequencyExisted = $true
+                        $previousFrequency = $frequencyProperty.Value
+                    }
+                }
+
+                try {
+                    New-Item -Path $frequencyPath -Force | Out-Null
+                    New-ItemProperty -Path $frequencyPath -Name $frequencyName -PropertyType DWord -Value 0 -Force | Out-Null
+                    Checkpoint-Computer -Description $restorePointDescription -RestorePointType 'MODIFY_SETTINGS' -ErrorAction Stop
+                }
+                finally {
+                    if ($frequencyExisted) {
+                        New-ItemProperty -Path $frequencyPath -Name $frequencyName -PropertyType DWord -Value $previousFrequency -Force | Out-Null
+                    }
+                    else {
+                        Remove-ItemProperty -Path $frequencyPath -Name $frequencyName -Force -ErrorAction SilentlyContinue
+                    }
+                }
+                Write-CleanupLog "Ponto de restauração criado: $restorePointDescription."
+            }
+        }
+        catch {
+            Write-CleanupLog "Não foi possível criar o ponto de restauração; a finalização seguirá normalmente: $($_.Exception.Message)"
+        }
+    }
+    else {
+        Write-CleanupLog 'Criação do ponto de restauração desativada por -SkipRestorePoint.'
+    }
+
     Unregister-ScheduledTask -TaskName 'Nyx-ConfigureUser' -Confirm:$false -ErrorAction SilentlyContinue
     Unregister-ScheduledTask -TaskName 'Nyx-CleanupUserTask' -Confirm:$false -ErrorAction SilentlyContinue
     exit 0
 }
-catch { exit 1 }
-'@ | Set-Content -LiteralPath $cleanupScript -Encoding UTF8
+catch {
+    Write-CleanupLog "Falha ao finalizar o provisionamento: $($_.Exception.Message)"
+    exit 1
+}
+'@
+    $cleanupScriptContent = $cleanupScriptContent.Replace('__CREATE_RESTORE_POINT__', $createRestorePointLiteral)
+    $cleanupScriptContent = $cleanupScriptContent.Replace('__RESTORE_POINT_DESCRIPTION__', $restorePointDescription.Replace("'", "''"))
+    $cleanupScriptContent | Set-Content -LiteralPath $cleanupScript -Encoding UTF8
 
     $user = Get-LocalUser -Name $LocalUserName
     & icacls.exe $UserStateRoot /grant "*$($user.SID.Value):(OI)(CI)M" /T /C /Q | Out-Null
@@ -829,7 +910,7 @@ catch { exit 1 }
     $cleanupTrigger = New-ScheduledTaskTrigger -AtLogOn -User $user.SID.Value
     $cleanupTrigger.Delay = 'PT2M'
     $cleanupPrincipal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-    $cleanupSettings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 5) -StartWhenAvailable
+    $cleanupSettings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 15) -StartWhenAvailable
     Register-ScheduledTask -TaskName 'Nyx-CleanupUserTask' -Action $cleanupAction -Trigger $cleanupTrigger -Principal $cleanupPrincipal -Settings $cleanupSettings -Force | Out-Null
 
     Write-NyxLog 'Personalização do primeiro logon do nyx registrada.'
@@ -841,27 +922,6 @@ function Clear-PublicDesktopShortcuts {
         Get-ChildItem -LiteralPath $publicDesktop -File -ErrorAction SilentlyContinue |
             Where-Object { $_.Extension -in @('.lnk','.url') } |
             Remove-Item -Force -ErrorAction SilentlyContinue
-    }
-}
-
-function New-NyxProvisioningRestorePoint {
-    try {
-        $operatingSystem = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
-        if ([int]$operatingSystem.ProductType -ne 1) {
-            Write-NyxLog 'Ponto de restauração indisponível nesta edição do Windows; etapa ignorada.' 'WARN'
-            return
-        }
-
-        Enable-ComputerRestore -Drive $SystemDriveRoot -ErrorAction Stop
-        $description = "Nyx Cloud $Version - provisionamento concluído"
-        Checkpoint-Computer `
-            -Description $description `
-            -RestorePointType 'MODIFY_SETTINGS' `
-            -ErrorAction Stop
-        Write-NyxLog "Ponto de restauração criado: $description."
-    }
-    catch {
-        Write-NyxLog "Não foi possível criar o ponto de restauração; o provisionamento seguirá normalmente: $($_.Exception.Message)" 'WARN'
     }
 }
 
@@ -963,13 +1023,6 @@ try {
 
     Set-NyxState -Status 'AWAITING_USER_PROFILE'
     Write-NyxLog 'Etapa administrativa concluída. O usuário nyx será configurado no próximo logon.'
-
-    if (-not $SkipRestorePoint) {
-        New-NyxProvisioningRestorePoint
-    }
-    else {
-        Write-NyxLog 'Criação do ponto de restauração ignorada por -SkipRestorePoint.' 'WARN'
-    }
 
     if (-not $SkipRestart) {
         Write-NyxLog 'Reiniciando a máquina em 30 segundos.'
