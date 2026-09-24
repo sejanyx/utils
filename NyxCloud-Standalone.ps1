@@ -25,7 +25,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$Version = '0.4.11-standalone'
+$Version = '0.4.12-standalone'
 $LocalUserName = 'nyx'
 $LocalUserPassword = 'nyxcloud'
 $ApolloDisplayName = 'nyxcloud'
@@ -66,6 +66,7 @@ if ([string]::IsNullOrWhiteSpace($ProgramFilesX86Root)) {
 }
 $TempRoot = Get-NyxRequiredValue -Value ([IO.Path]::GetTempPath()) -Name 'TEMP'
 $ComputerName = Get-NyxRequiredValue -Value ([Environment]::MachineName) -Name 'ComputerName'
+$script:TargetComputerName = $ComputerName
 
 $NyxRoot = Join-NyxPath -Base $ProgramDataRoot -Child 'Nyx'
 $LogRoot = Join-NyxPath -Base $NyxRoot -Child 'Logs'
@@ -101,7 +102,8 @@ function Set-NyxState {
         provisionerVersion = $Version
         status = $Status
         detail = $Detail
-        computerName = $ComputerName
+        computerName = $script:TargetComputerName
+        previousComputerName = $ComputerName
         localUser = $LocalUserName
         apolloDisplayName = $ApolloDisplayName
         tailscaleHostname = $script:TailscaleHostname
@@ -130,6 +132,43 @@ function Assert-Environment {
         throw 'WinGet não foi encontrado. Instale/atualize o App Installer da Microsoft antes de executar este script.'
     }
 
+}
+
+function Set-NyxComputerName {
+    $namePattern = '^nyx-\d{5}$'
+    $configuredName = $null
+    try {
+        $configuredName = (Get-ItemProperty `
+            -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ComputerName' `
+            -Name 'ComputerName' `
+            -ErrorAction Stop).ComputerName
+    }
+    catch {
+        $configuredName = $null
+    }
+
+    if ($ComputerName -match $namePattern) {
+        $script:TargetComputerName = $ComputerName.ToLowerInvariant()
+    }
+    elseif ($configuredName -and $configuredName -match $namePattern) {
+        $script:TargetComputerName = $configuredName.ToLowerInvariant()
+    }
+    else {
+        $script:TargetComputerName = 'nyx-{0:D5}' -f (Get-Random -Minimum 0 -Maximum 100000)
+    }
+
+    $script:TailscaleHostname = $script:TargetComputerName
+    if ($ComputerName -ieq $script:TargetComputerName) {
+        Write-NyxLog "Nome do computador mantido como $script:TargetComputerName."
+        return
+    }
+    if ($configuredName -and $configuredName -ieq $script:TargetComputerName) {
+        Write-NyxLog "Renomeação para $script:TargetComputerName já está pendente; será aplicada no reinício."
+        return
+    }
+
+    Rename-Computer -NewName $script:TargetComputerName -Force -ErrorAction Stop
+    Write-NyxLog "Computador renomeado para $script:TargetComputerName; alteração será aplicada no reinício."
 }
 
 function Set-NyxLocalPasswordPolicy {
@@ -309,7 +348,7 @@ function Install-AndConfigureAutologon {
 
     $process = Start-Process -FilePath $exePath -ArgumentList @(
         $LocalUserName,
-        $ComputerName,
+        $script:TargetComputerName,
         $LocalUserPassword,
         '/accepteula'
     ) -Wait -PassThru -WindowStyle Hidden
@@ -489,18 +528,8 @@ function Set-ApolloFirewallRule {
 }
 
 function Read-TailscaleEnrollmentInput {
-    do {
-        $hostnameInput = (Read-Host 'Tailscale hostname').Trim()
-        if (-not $hostnameInput) {
-            $hostnameInput = $ComputerName.ToLowerInvariant()
-        }
-        if ($hostnameInput -notmatch '^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$') {
-            Write-Host 'Hostname inválido. Use apenas letras, números e hífen.' -ForegroundColor Yellow
-            $hostnameInput = $null
-        }
-    } while (-not $hostnameInput)
-
-    $script:TailscaleHostname = $hostnameInput.ToLowerInvariant()
+    $script:TailscaleHostname = $script:TargetComputerName
+    Write-Host "Nome do computador e hostname Tailscale: $script:TailscaleHostname"
     $script:TailscaleSecureKey = Read-Host 'Tailscale auth key' -AsSecureString
     if ($script:TailscaleSecureKey.Length -eq 0) {
         throw 'A auth key do Tailscale não pode ficar vazia.'
@@ -908,12 +937,13 @@ try {
         exit 0
     }
 
+    Set-NyxComputerName
     Set-NyxState -Status 'BOOTSTRAP_STARTED'
     if (-not $SkipTailscaleEnrollment) {
         Read-TailscaleEnrollmentInput
     }
     else {
-        $script:TailscaleHostname = $ComputerName.ToLowerInvariant()
+        $script:TailscaleHostname = $script:TargetComputerName
     }
     Set-SystemBrandingAndLogon
     Set-NyxLocalPasswordPolicy
