@@ -6,7 +6,6 @@
 param(
     [switch]$SkipTailscaleEnrollment,
     [switch]$SkipRestart,
-    [switch]$SkipRestorePoint,
     [switch]$CreateRestorePoint,
     [switch]$KeepPowerShellHistory,
     [switch]$RepairApolloOnly
@@ -26,7 +25,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$Version = '0.4.14-standalone'
+$Version = '0.4.15-standalone'
 $LocalUserName = 'nyx'
 $LocalUserPassword = 'nyxcloud'
 $ApolloDisplayName = 'nyxcloud'
@@ -800,7 +799,7 @@ catch {
 }
 '@ | Set-Content -LiteralPath $configScript -Encoding UTF8
 
-$createRestorePointLiteral = if ($SkipRestorePoint) { '$false' } else { '$true' }
+$createRestorePointLiteral = if ($CreateRestorePoint) { '$true' } else { '$false' }
 $restorePointDescription = "Nyx Cloud $Version - provisionamento concluído"
 
 $cleanupScriptContent = @'
@@ -880,7 +879,7 @@ try {
         }
     }
     else {
-        Write-CleanupLog 'Criação do ponto de restauração desativada por -SkipRestorePoint.'
+        Write-CleanupLog 'Criação do ponto de restauração desativada por padrão.'
     }
 
     Unregister-ScheduledTask -TaskName 'Nyx-ConfigureUser' -Confirm:$false -ErrorAction SilentlyContinue
