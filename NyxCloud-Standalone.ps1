@@ -62,7 +62,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$Version = '0.4.17-standalone'
+$Version = '0.4.18-standalone'
 $LocalUserName = 'nyx'
 $LocalUserPassword = 'nyxcloud'
 $ApolloDisplayName = 'nyxcloud'
@@ -432,18 +432,33 @@ function Install-AndConfigureAutologon {
 
 function Set-SystemBrandingAndLogon {
     $oemPath = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\OEMInformation'
-    New-Item -Path $oemPath -Force | Out-Null
-    Set-ItemProperty -Path $oemPath -Name 'Model' -Value 'Nyx cloud' -Force
+    try {
+        if (-not (Test-Path -LiteralPath $oemPath)) {
+            New-Item -Path $oemPath -Force -ErrorAction Stop | Out-Null
+        }
+        Set-ItemProperty -Path $oemPath -Name 'Model' -Value 'Nyx cloud' -Force -ErrorAction Stop
+    }
+    catch {
+        Write-NyxLog "O branding OEM não pôde ser aplicado e será ignorado: $($_.Exception.Message)" 'WARN'
+    }
 
     $systemPolicy = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
-    New-Item -Path $systemPolicy -Force | Out-Null
-    New-ItemProperty -Path $systemPolicy -Name 'dontdisplaylastusername' -PropertyType DWord -Value 1 -Force | Out-Null
-    New-ItemProperty -Path $systemPolicy -Name 'DontDisplayLockedUserId' -PropertyType DWord -Value 3 -Force | Out-Null
-    New-ItemProperty -Path $systemPolicy -Name 'HideFastUserSwitching' -PropertyType DWord -Value 1 -Force | Out-Null
+    try {
+        if (-not (Test-Path -LiteralPath $systemPolicy)) {
+            New-Item -Path $systemPolicy -Force -ErrorAction Stop | Out-Null
+        }
+        New-ItemProperty -Path $systemPolicy -Name 'dontdisplaylastusername' -PropertyType DWord -Value 1 -Force -ErrorAction Stop | Out-Null
+        New-ItemProperty -Path $systemPolicy -Name 'DontDisplayLockedUserId' -PropertyType DWord -Value 3 -Force -ErrorAction Stop | Out-Null
+        New-ItemProperty -Path $systemPolicy -Name 'HideFastUserSwitching' -PropertyType DWord -Value 1 -Force -ErrorAction Stop | Out-Null
+    }
+    catch {
+        Write-NyxLog "As políticas visuais da tela de logon estão protegidas pelo Windows ou Intune e serão preservadas: $($_.Exception.Message)" 'WARN'
+    }
 
-    $shellPath = Join-NyxPath -Base $SystemDriveRoot -Child 'Users\Default\AppData\Local\Microsoft\Windows\Shell'
-    New-Item -Path $shellPath -ItemType Directory -Force | Out-Null
-    $layoutPath = Join-Path $shellPath 'LayoutModification.xml'
+    try {
+        $shellPath = Join-NyxPath -Base $SystemDriveRoot -Child 'Users\Default\AppData\Local\Microsoft\Windows\Shell'
+        New-Item -Path $shellPath -ItemType Directory -Force -ErrorAction Stop | Out-Null
+        $layoutPath = Join-Path $shellPath 'LayoutModification.xml'
 @'
 <?xml version="1.0" encoding="utf-8"?>
 <LayoutModificationTemplate
@@ -457,7 +472,11 @@ function Set-SystemBrandingAndLogon {
     </defaultlayout:TaskbarLayout>
   </CustomTaskbarLayoutCollection>
 </LayoutModificationTemplate>
-'@ | Set-Content -LiteralPath $layoutPath -Encoding UTF8
+'@ | Set-Content -LiteralPath $layoutPath -Encoding UTF8 -ErrorAction Stop
+    }
+    catch {
+        Write-NyxLog "O layout padrão da barra de tarefas não pôde ser preparado e será ignorado: $($_.Exception.Message)" 'WARN'
+    }
 }
 
 function Configure-Apollo {
