@@ -1,6 +1,5 @@
 
 #requires -Version 5.1
-#requires -RunAsAdministrator
 
 [CmdletBinding()]
 param(
@@ -10,6 +9,43 @@ param(
     [switch]$KeepPowerShellHistory,
     [switch]$RepairApolloOnly
 )
+
+$ProvisionerUrl = 'https://raw.githubusercontent.com/sejanyx/utils/refs/heads/main/NyxCloud-Standalone.ps1'
+$currentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$currentPrincipal = New-Object Security.Principal.WindowsPrincipal($currentIdentity)
+if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    $forwardedSwitches = @(
+        foreach ($parameter in $PSBoundParameters.GetEnumerator()) {
+            if ([bool]$parameter.Value) { "-$($parameter.Key)" }
+        }
+    )
+    $forwardedArguments = $forwardedSwitches -join ' '
+    if (-not [string]::IsNullOrWhiteSpace($PSCommandPath)) {
+        $escapedScriptPath = $PSCommandPath.Replace("'", "''")
+        $elevatedCommand = "& '$escapedScriptPath' $forwardedArguments"
+    }
+    else {
+        $elevatedCommand = "& ([scriptblock]::Create((Invoke-RestMethod -UseBasicParsing -Uri '$ProvisionerUrl'))) $forwardedArguments"
+    }
+    $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($elevatedCommand))
+    $elevationHost = [IO.Path]::Combine($env:SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+    try {
+        Write-Host 'Solicitando permissão de administrador para continuar...'
+        $elevatedProcess = Start-Process `
+            -FilePath $elevationHost `
+            -ArgumentList @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encodedCommand) `
+            -Verb RunAs `
+            -Wait `
+            -PassThru
+        if ($elevatedProcess.ExitCode -ne 0) {
+            throw "A execução elevada terminou com o código $($elevatedProcess.ExitCode)."
+        }
+    }
+    catch {
+        Write-Error "Não foi possível obter permissão de administrador. Aceite a solicitação do UAC ou abra o Windows PowerShell como Administrador. Detalhe: $($_.Exception.Message)"
+    }
+    return
+}
 
 $WallpaperUrls = @(
     'https://raw.githubusercontent.com/sejanyx/utils/refs/heads/main/a.png',
@@ -25,7 +61,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$Version = '0.4.15-standalone'
+$Version = '0.4.16-standalone'
 $LocalUserName = 'nyx'
 $LocalUserPassword = 'nyxcloud'
 $ApolloDisplayName = 'nyxcloud'
@@ -34,6 +70,7 @@ $ApolloPassword = 'nyxcloud'
 $ApolloAdminPort = 47990
 $script:TailscaleHostname = $null
 $script:TailscaleSecureKey = $null
+$script:CurrentStep = 'inicialização'
 
 function Get-NyxRequiredValue {
     param(
@@ -78,7 +115,12 @@ $LogPath = Join-NyxPath -Base $LogRoot -Child 'provisioning.log'
 
 function Initialize-NyxDirectories {
     foreach ($path in @($NyxRoot, $LogRoot, $ToolRoot, $WallpaperRoot, $UserStateRoot)) {
-        New-Item -Path $path -ItemType Directory -Force | Out-Null
+        try {
+            New-Item -Path $path -ItemType Directory -Force -ErrorAction Stop | Out-Null
+        }
+        catch [UnauthorizedAccessException] {
+            throw "Sem permissão para preparar o diretório '$path'. Verifique se uma política do Intune bloqueia gravações administrativas nesse caminho."
+        }
     }
 }
 
@@ -90,6 +132,25 @@ function Write-NyxLog {
     $line = '{0:o} [{1}] {2}' -f (Get-Date), $Level, $Message
     Add-Content -LiteralPath $LogPath -Value $line -Encoding UTF8
     Write-Host $line
+}
+
+function Set-NyxCurrentStep {
+    param([Parameter(Mandatory)] [string]$Name)
+    $script:CurrentStep = $Name
+    Write-NyxLog "Etapa iniciada: $Name."
+}
+
+function Test-NyxUnauthorizedError {
+    param([Parameter(Mandatory)] [Management.Automation.ErrorRecord]$ErrorRecord)
+    if ($ErrorRecord.FullyQualifiedErrorId -match 'Unauthorized|AccessDenied|PermissionDenied') {
+        return $true
+    }
+    $exception = $ErrorRecord.Exception
+    while ($null -ne $exception) {
+        if ($exception -is [UnauthorizedAccessException]) { return $true }
+        $exception = $exception.InnerException
+    }
+    return $false
 }
 
 function Set-NyxState {
@@ -897,6 +958,9 @@ catch {
 
     $user = Get-LocalUser -Name $LocalUserName
     & icacls.exe $UserStateRoot /grant "*$($user.SID.Value):(OI)(CI)M" /T /C /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Não foi possível conceder ao usuário nyx acesso ao diretório de configuração (icacls exit code $LASTEXITCODE)."
+    }
 
     $userAction = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$configScript`""
     $userTrigger = New-ScheduledTaskTrigger -AtLogOn -User $user.SID.Value
@@ -981,14 +1045,17 @@ function Clear-NyxPowerShellHistory {
     }
 }
 
-Initialize-NyxDirectories
-
 try {
-    Write-NyxLog "Nyx Cloud standalone $Version iniciado."
+    $script:CurrentStep = 'verificação do ambiente'
     Assert-Environment
+    $script:CurrentStep = 'preparação dos diretórios operacionais'
+    Initialize-NyxDirectories
+    Write-NyxLog "Nyx Cloud standalone $Version iniciado."
 
     if ($RepairApolloOnly) {
+        Set-NyxCurrentStep 'reparo da configuração do Apollo'
         Configure-Apollo
+        Set-NyxCurrentStep 'regra de firewall do Apollo'
         Set-ApolloFirewallRule
         Write-NyxLog 'Reparo do Apollo concluído.'
         try { Clear-NyxPowerShellHistory } catch { Write-NyxLog "Falha ao limpar o histórico do PowerShell: $($_.Exception.Message)" 'WARN' }
@@ -997,29 +1064,43 @@ try {
         exit 0
     }
 
+    Set-NyxCurrentStep 'definição do nome do computador'
     Set-NyxComputerName
     Set-NyxState -Status 'BOOTSTRAP_STARTED'
     if (-not $SkipTailscaleEnrollment) {
+        Set-NyxCurrentStep 'leitura das credenciais do Tailscale'
         Read-TailscaleEnrollmentInput
     }
     else {
         $script:TailscaleHostname = $script:TargetComputerName
     }
+    Set-NyxCurrentStep 'personalização do sistema e da tela de logon'
     Set-SystemBrandingAndLogon
+    Set-NyxCurrentStep 'política de senha local'
     Set-NyxLocalPasswordPolicy
+    Set-NyxCurrentStep 'conta local nyx'
     Ensure-NyxUser
+    Set-NyxCurrentStep 'download dos wallpapers'
     Download-Wallpapers
+    Set-NyxCurrentStep 'configuração do logon automático'
     Install-AndConfigureAutologon
 
+    Set-NyxCurrentStep 'instalação dos aplicativos'
     Install-Applications
     Set-NyxState -Status 'SOFTWARE_INSTALLED'
 
+    Set-NyxCurrentStep 'configuração do Apollo'
     Configure-Apollo
+    Set-NyxCurrentStep 'regra de firewall do Apollo'
     Set-ApolloFirewallRule
+    Set-NyxCurrentStep 'registro da máquina no Tailscale'
     Connect-Tailscale
+    Set-NyxCurrentStep 'tarefas do primeiro logon'
     Register-NyxUserConfiguration
+    Set-NyxCurrentStep 'limpeza da área de trabalho pública'
     Clear-PublicDesktopShortcuts
 
+    Set-NyxCurrentStep 'finalização administrativa'
     Set-NyxState -Status 'AWAITING_USER_PROFILE'
     Write-NyxLog 'Etapa administrativa concluída. O usuário nyx será configurado no próximo logon.'
 
@@ -1043,8 +1124,25 @@ try {
 }
 catch {
     $script:TailscaleSecureKey = $null
-    $safeMessage = $_.Exception.Message -replace 'tskey-[A-Za-z0-9_-]+', '[REDACTED]'
-    try { Set-NyxState -Status 'FAILED' -Detail $safeMessage } catch {}
-    try { Write-NyxLog $safeMessage 'ERROR' } catch { Write-Error $safeMessage }
+    $rawMessage = $_.Exception.Message -replace 'tskey-[A-Za-z0-9_-]+', '[REDACTED]'
+    $errorType = $_.Exception.GetType().FullName
+    $errorId = $_.FullyQualifiedErrorId
+    $errorLine = $_.InvocationInfo.ScriptLineNumber
+    if (Test-NyxUnauthorizedError -ErrorRecord $_) {
+        $safeMessage = "Operação não autorizada na etapa '$script:CurrentStep'. O script já está elevado; uma política do Windows ou do Intune pode ter bloqueado a operação. Detalhe: $rawMessage"
+    }
+    else {
+        $safeMessage = "Falha na etapa '$script:CurrentStep': $rawMessage"
+    }
+    $diagnostic = "$safeMessage [tipo=$errorType; erro=$errorId; linha=$errorLine]"
+    try { Set-NyxState -Status 'FAILED' -Detail $diagnostic } catch {}
+    try {
+        Write-NyxLog $diagnostic 'ERROR'
+    }
+    catch {
+        $fallbackLog = Join-Path ([IO.Path]::GetTempPath()) 'Nyx-provisioning-error.log'
+        Add-Content -LiteralPath $fallbackLog -Value ('{0:o} [ERROR] {1}' -f (Get-Date), $diagnostic) -Encoding UTF8 -ErrorAction SilentlyContinue
+        Write-Error "$diagnostic Log alternativo: $fallbackLog"
+    }
     exit 1
 }
