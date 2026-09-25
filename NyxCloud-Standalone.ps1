@@ -52,6 +52,7 @@ $WallpaperUrls = @(
     'https://raw.githubusercontent.com/sejanyx/utils/refs/heads/main/b.png',
     'https://raw.githubusercontent.com/sejanyx/utils/refs/heads/main/c.png',
     'https://raw.githubusercontent.com/sejanyx/utils/refs/heads/main/d.png',
+    'https://raw.githubusercontent.com/sejanyx/utils/refs/heads/main/e.png',
     'https://raw.githubusercontent.com/sejanyx/utils/refs/heads/main/f.png',
     'https://raw.githubusercontent.com/sejanyx/utils/refs/heads/main/g.png',
     'https://raw.githubusercontent.com/sejanyx/utils/refs/heads/main/h.png'
@@ -61,7 +62,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$Version = '0.4.16-standalone'
+$Version = '0.4.17-standalone'
 $LocalUserName = 'nyx'
 $LocalUserPassword = 'nyxcloud'
 $ApolloDisplayName = 'nyxcloud'
@@ -108,18 +109,27 @@ $script:TargetComputerName = $ComputerName
 $NyxRoot = Join-NyxPath -Base $ProgramDataRoot -Child 'Nyx'
 $LogRoot = Join-NyxPath -Base $NyxRoot -Child 'Logs'
 $ToolRoot = Join-NyxPath -Base $NyxRoot -Child 'Tools'
-$WallpaperRoot = Join-NyxPath -Base $NyxRoot -Child 'Wallpapers'
 $UserStateRoot = Join-NyxPath -Base $NyxRoot -Child 'UserState'
 $StatePath = Join-NyxPath -Base $NyxRoot -Child 'provisioning-state.json'
 $LogPath = Join-NyxPath -Base $LogRoot -Child 'provisioning.log'
 
 function Initialize-NyxDirectories {
-    foreach ($path in @($NyxRoot, $LogRoot, $ToolRoot, $WallpaperRoot, $UserStateRoot)) {
+    foreach ($path in @($NyxRoot, $LogRoot, $ToolRoot, $UserStateRoot)) {
         try {
             New-Item -Path $path -ItemType Directory -Force -ErrorAction Stop | Out-Null
         }
         catch [UnauthorizedAccessException] {
             throw "Sem permissão para preparar o diretório '$path'. Verifique se uma política do Intune bloqueia gravações administrativas nesse caminho."
+        }
+    }
+    $legacyWallpaperRoot = Join-NyxPath -Base $NyxRoot -Child 'Wallpapers'
+    if (Test-Path -LiteralPath $legacyWallpaperRoot -PathType Container) {
+        try {
+            Remove-Item -LiteralPath $legacyWallpaperRoot -Recurse -Force -ErrorAction Stop
+            Write-NyxLog 'Pasta antiga de staging dos wallpapers removida.'
+        }
+        catch {
+            Write-NyxLog "A pasta antiga de staging não pôde ser removida: $($_.Exception.Message)" 'WARN'
         }
     }
 }
@@ -450,46 +460,6 @@ function Set-SystemBrandingAndLogon {
 '@ | Set-Content -LiteralPath $layoutPath -Encoding UTF8
 }
 
-function Download-Wallpapers {
-    if (-not $WallpaperUrls -or $WallpaperUrls.Count -eq 0) {
-        Write-NyxLog 'Nenhum wallpaper configurado; etapa ignorada.' 'WARN'
-        return
-    }
-
-    $downloaded = 0
-    foreach ($url in $WallpaperUrls) {
-        $destination = $null
-        try {
-            $uri = [Uri]$url
-            $fileName = [IO.Path]::GetFileName($uri.AbsolutePath)
-            if (-not $fileName) {
-                throw 'URL de wallpaper sem nome de arquivo válido'
-            }
-
-            $destination = Join-Path $WallpaperRoot $fileName
-            Write-NyxLog "Baixando wallpaper $fileName..."
-            Invoke-WebRequest -Uri $url -OutFile $destination -UseBasicParsing
-            if ((Get-Item -LiteralPath $destination).Length -lt 1024) {
-                throw 'arquivo recebido é pequeno demais para ser o wallpaper esperado'
-            }
-            $downloaded++
-        }
-        catch {
-            if ($destination) {
-                Remove-Item -LiteralPath $destination -Force -ErrorAction SilentlyContinue
-            }
-            Write-NyxLog "Falha ao baixar wallpaper $url : $($_.Exception.Message)" 'WARN'
-        }
-    }
-
-    if ($downloaded -eq 0) {
-        Write-NyxLog 'Nenhum wallpaper pôde ser baixado.' 'WARN'
-    }
-    else {
-        Write-NyxLog "$downloaded wallpaper(s) preparado(s)."
-    }
-}
-
 function Configure-Apollo {
     $apolloExecutable = Join-NyxPath -Base $ProgramFilesRoot -Child 'Apollo\sunshine.exe'
     $configPath = Join-NyxPath -Base $ProgramFilesRoot -Child 'Apollo\config\sunshine.conf'
@@ -671,17 +641,19 @@ function Register-NyxUserConfiguration {
 
     Remove-Item -LiteralPath $markerPath -Force -ErrorAction SilentlyContinue
 
-@'
+$configScriptContent = @'
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $expectedUser = 'nyx'
 if ($env:USERNAME -ine $expectedUser) { exit 0 }
+$wallpaperUrls = @(
+__WALLPAPER_URLS__
+)
 
 $programData = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
 if ([string]::IsNullOrWhiteSpace($programData)) { throw 'ProgramData indisponível.' }
 $nyxRoot = [IO.Path]::Combine($programData, 'Nyx')
-$wallpaperRoot = [IO.Path]::Combine($nyxRoot, 'Wallpapers')
 $userStateRoot = [IO.Path]::Combine($nyxRoot, 'UserState')
 $markerPath = [IO.Path]::Combine($userStateRoot, 'user-profile-ready.json')
 $logPath = [IO.Path]::Combine($userStateRoot, 'user-configuration.log')
@@ -693,19 +665,24 @@ function Write-UserLog([string]$Message) {
 try {
     Write-UserLog 'Iniciando personalização do perfil nyx.'
     $currentSessionId = [Diagnostics.Process]::GetCurrentProcess().SessionId
-    $explorerDeadline = (Get-Date).AddMinutes(2)
+    $explorerDeadline = (Get-Date).AddMinutes(30)
+    $desktopReady = $false
     do {
         $explorerProcesses = @(Get-Process explorer -ErrorAction SilentlyContinue |
             Where-Object { $_.SessionId -eq $currentSessionId })
-        if ($explorerProcesses.Count -gt 0) { break }
+        $initialExperienceProcesses = @(Get-Process CloudExperienceHost,UserOOBEBroker -ErrorAction SilentlyContinue |
+            Where-Object { $_.SessionId -eq $currentSessionId })
+        if ($explorerProcesses.Count -gt 0 -and $initialExperienceProcesses.Count -eq 0) {
+            $desktopReady = $true
+            break
+        }
         Start-Sleep -Seconds 2
     } while ((Get-Date) -lt $explorerDeadline)
-    if ($explorerProcesses.Count -eq 0) {
-        Write-UserLog 'Explorer não foi detectado; a personalização continuará mesmo assim.'
+    if (-not $desktopReady) {
+        throw 'A área de trabalho ou a experiência inicial de privacidade ainda está ativa. A personalização será tentada novamente no próximo logon.'
     }
-    else {
-        Start-Sleep -Seconds 5
-    }
+    Write-UserLog 'Área de trabalho detectada; aguardando a conclusão das configurações iniciais do Windows.'
+    Start-Sleep -Seconds 15
 
     Add-Type @"
 using System;
@@ -789,61 +766,92 @@ public static class NyxAppearance {
     New-Item -Path $explorerPolicy -Force | Out-Null
     New-ItemProperty -Path $explorerPolicy -Name 'StartLayoutFile' -PropertyType String -Value $layoutPath -Force | Out-Null
 
-    $wallpaperName = $null
-    $sourceWallpapers = @()
-    if (Test-Path -LiteralPath $wallpaperRoot -PathType Container) {
-        $sourceWallpapers = @(Get-ChildItem -LiteralPath $wallpaperRoot -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.Extension -in @('.png','.jpg','.jpeg','.bmp') })
+    $pictures = [Environment]::GetFolderPath([Environment+SpecialFolder]::MyPictures)
+    if ([string]::IsNullOrWhiteSpace($pictures)) {
+        $userProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+        if ([string]::IsNullOrWhiteSpace($userProfile)) { throw 'Perfil do usuário indisponível.' }
+        $pictures = [IO.Path]::Combine($userProfile, 'Pictures')
+    }
+    $wallpaperDir = [IO.Path]::Combine($pictures, 'Nyx Wallpapers')
+    New-Item -Path $wallpaperDir -ItemType Directory -Force | Out-Null
+    Write-UserLog "Diretório dos wallpapers: $wallpaperDir."
+
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    Add-Type -AssemblyName System.Drawing
+    $downloadErrors = @()
+    foreach ($url in $wallpaperUrls) {
+        $temporaryFile = $null
+        try {
+            $uri = [Uri]$url
+            $fileName = [IO.Path]::GetFileName($uri.AbsolutePath)
+            $extension = [IO.Path]::GetExtension($fileName).ToLowerInvariant()
+            if ([string]::IsNullOrWhiteSpace($fileName) -or $extension -notin @('.png','.jpg','.jpeg','.bmp')) {
+                throw 'URL sem nome ou extensão de imagem válida'
+            }
+            $destination = Join-Path $wallpaperDir $fileName
+            $temporaryFile = "$destination.download"
+            Remove-Item -LiteralPath $temporaryFile -Force -ErrorAction SilentlyContinue
+            Invoke-WebRequest -Uri $url -OutFile $temporaryFile -UseBasicParsing -ErrorAction Stop
+            if ((Get-Item -LiteralPath $temporaryFile -ErrorAction Stop).Length -lt 1024) {
+                throw 'arquivo recebido é pequeno demais'
+            }
+            $downloadedImage = [Drawing.Image]::FromFile($temporaryFile)
+            try {
+                if ($downloadedImage.Width -lt 1 -or $downloadedImage.Height -lt 1) {
+                    throw 'arquivo recebido não possui dimensões válidas'
+                }
+            }
+            finally {
+                $downloadedImage.Dispose()
+            }
+            Move-Item -LiteralPath $temporaryFile -Destination $destination -Force
+            Write-UserLog "Wallpaper baixado: $fileName."
+        }
+        catch {
+            if ($temporaryFile) { Remove-Item -LiteralPath $temporaryFile -Force -ErrorAction SilentlyContinue }
+            $downloadErrors += "$url ($($_.Exception.Message))"
+            Write-UserLog "Falha ao baixar wallpaper $url : $($_.Exception.Message)"
+        }
     }
 
-    if ($sourceWallpapers.Count -gt 0) {
-        $pictures = [Environment]::GetFolderPath([Environment+SpecialFolder]::MyPictures)
-        if ([string]::IsNullOrWhiteSpace($pictures)) {
-            $userProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
-            if ([string]::IsNullOrWhiteSpace($userProfile)) { throw 'Perfil do usuário indisponível.' }
-            $pictures = [IO.Path]::Combine($userProfile, 'Pictures')
-        }
-        $wallpaperDir = [IO.Path]::Combine($pictures, 'Nyx Wallpapers')
-        New-Item -Path $wallpaperDir -ItemType Directory -Force | Out-Null
+    $sourceWallpapers = @(Get-ChildItem -LiteralPath $wallpaperDir -File -ErrorAction Stop |
+        Where-Object { $_.Name -ne 'NyxCurrentWallpaper.bmp' -and $_.Extension.ToLowerInvariant() -in @('.png','.jpg','.jpeg','.bmp') })
+    if ($sourceWallpapers.Count -eq 0) {
+        throw "Nenhum wallpaper válido foi obtido em '$wallpaperDir'. Falhas: $($downloadErrors -join '; ')"
+    }
 
-        foreach ($source in $sourceWallpapers) {
-            Copy-Item -LiteralPath $source.FullName -Destination (Join-Path $wallpaperDir $source.Name) -Force
-        }
+    $selected = $sourceWallpapers | Get-Random
+    $userWallpaper = Join-Path $wallpaperDir 'NyxCurrentWallpaper.bmp'
+    Remove-Item -LiteralPath $userWallpaper -Force -ErrorAction SilentlyContinue
+    $sourceImage = [Drawing.Image]::FromFile($selected.FullName)
+    try {
+        $sourceImage.Save($userWallpaper, [Drawing.Imaging.ImageFormat]::Bmp)
+    }
+    finally {
+        $sourceImage.Dispose()
+    }
 
-        $selected = $sourceWallpapers | Get-Random
-        $userWallpaper = Join-Path $wallpaperDir 'NyxCurrentWallpaper.bmp'
-        Remove-Item -LiteralPath $userWallpaper -Force -ErrorAction SilentlyContinue
-        Add-Type -AssemblyName System.Drawing
-        $sourceImage = [Drawing.Image]::FromFile($selected.FullName)
-        try {
-            $sourceImage.Save($userWallpaper, [Drawing.Imaging.ImageFormat]::Bmp)
-        }
-        finally {
-            $sourceImage.Dispose()
-        }
+    $desktopKey = 'HKCU:\Control Panel\Desktop'
+    Set-ItemProperty -Path $desktopKey -Name Wallpaper -Value $userWallpaper
+    Set-ItemProperty -Path $desktopKey -Name WallpaperStyle -Value '10'
+    Set-ItemProperty -Path $desktopKey -Name TileWallpaper -Value '0'
 
-        $desktopKey = 'HKCU:\Control Panel\Desktop'
-        Set-ItemProperty -Path $desktopKey -Name Wallpaper -Value $userWallpaper
-        Set-ItemProperty -Path $desktopKey -Name WallpaperStyle -Value '10'
-        Set-ItemProperty -Path $desktopKey -Name TileWallpaper -Value '0'
-
-        $wallpaperApplied = $false
-        for ($attempt = 1; $attempt -le 3; $attempt++) {
-            if ([NyxAppearance]::SystemParametersInfo(20, 0, $userWallpaper, 3)) {
+    $wallpaperApplied = $false
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        if ([NyxAppearance]::SystemParametersInfo(20, 0, $userWallpaper, 3)) {
+            $configuredWallpaper = (Get-ItemProperty -Path $desktopKey -Name Wallpaper -ErrorAction Stop).Wallpaper
+            if ($configuredWallpaper -eq $userWallpaper) {
                 $wallpaperApplied = $true
                 break
             }
-            Start-Sleep -Seconds 3
         }
-        if (-not $wallpaperApplied) {
-            throw 'O Windows não aceitou o wallpaper.'
-        }
-        $wallpaperName = $selected.Name
-        Write-UserLog "Wallpaper aplicado a partir de $wallpaperName."
+        Start-Sleep -Seconds 3
     }
-    else {
-        Write-UserLog 'Nenhum wallpaper foi encontrado; personalização continuará sem ele.'
+    if (-not $wallpaperApplied) {
+        throw 'O Windows não confirmou a aplicação do wallpaper.'
     }
+    $wallpaperName = $selected.Name
+    Write-UserLog "Wallpaper aplicado a partir de $wallpaperName."
 
     [ordered]@{
         status = 'READY'
@@ -858,7 +866,12 @@ catch {
     Write-UserLog "Falha: $($_.Exception.Message)"
     exit 1
 }
-'@ | Set-Content -LiteralPath $configScript -Encoding UTF8
+'@
+    $wallpaperUrlLiteral = ($WallpaperUrls | ForEach-Object {
+        "    '$($_.Replace("'", "''"))'"
+    }) -join ",`r`n"
+    $configScriptContent = $configScriptContent.Replace('__WALLPAPER_URLS__', $wallpaperUrlLiteral)
+    $configScriptContent | Set-Content -LiteralPath $configScript -Encoding UTF8
 
 $createRestorePointLiteral = if ($CreateRestorePoint) { '$true' } else { '$false' }
 $restorePointDescription = "Nyx Cloud $Version - provisionamento concluído"
@@ -878,7 +891,7 @@ function Write-CleanupLog([string]$Message) {
 
 try {
     $profileReady = $false
-    $deadline = (Get-Date).AddMinutes(10)
+    $deadline = (Get-Date).AddMinutes(40)
     do {
         if (Test-Path -LiteralPath $markerPath -PathType Leaf) {
             $state = Get-Content -LiteralPath $markerPath -Raw | ConvertFrom-Json
@@ -966,14 +979,14 @@ catch {
     $userTrigger = New-ScheduledTaskTrigger -AtLogOn -User $user.SID.Value
     $userTrigger.Delay = 'PT30S'
     $userPrincipal = New-ScheduledTaskPrincipal -UserId $user.SID.Value -LogonType Interactive -RunLevel Limited
-    $userSettings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 10) -StartWhenAvailable
+    $userSettings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 40) -StartWhenAvailable
     Register-ScheduledTask -TaskName 'Nyx-ConfigureUser' -Action $userAction -Trigger $userTrigger -Principal $userPrincipal -Settings $userSettings -Force | Out-Null
 
     $cleanupAction = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$cleanupScript`""
     $cleanupTrigger = New-ScheduledTaskTrigger -AtLogOn -User $user.SID.Value
     $cleanupTrigger.Delay = 'PT2M'
     $cleanupPrincipal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-    $cleanupSettings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 15) -StartWhenAvailable
+    $cleanupSettings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 45) -StartWhenAvailable
     Register-ScheduledTask -TaskName 'Nyx-CleanupUserTask' -Action $cleanupAction -Trigger $cleanupTrigger -Principal $cleanupPrincipal -Settings $cleanupSettings -Force | Out-Null
 
     Write-NyxLog 'Personalização do primeiro logon do nyx registrada.'
@@ -1080,8 +1093,6 @@ try {
     Set-NyxLocalPasswordPolicy
     Set-NyxCurrentStep 'conta local nyx'
     Ensure-NyxUser
-    Set-NyxCurrentStep 'download dos wallpapers'
-    Download-Wallpapers
     Set-NyxCurrentStep 'configuração do logon automático'
     Install-AndConfigureAutologon
 
