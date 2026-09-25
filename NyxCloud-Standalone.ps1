@@ -47,22 +47,13 @@ if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Adm
     return
 }
 
-$WallpaperUrls = @(
-    'https://raw.githubusercontent.com/sejanyx/utils/refs/heads/main/a.png',
-    'https://raw.githubusercontent.com/sejanyx/utils/refs/heads/main/b.png',
-    'https://raw.githubusercontent.com/sejanyx/utils/refs/heads/main/c.png',
-    'https://raw.githubusercontent.com/sejanyx/utils/refs/heads/main/d.png',
-    'https://raw.githubusercontent.com/sejanyx/utils/refs/heads/main/e.png',
-    'https://raw.githubusercontent.com/sejanyx/utils/refs/heads/main/f.png',
-    'https://raw.githubusercontent.com/sejanyx/utils/refs/heads/main/g.png',
-    'https://raw.githubusercontent.com/sejanyx/utils/refs/heads/main/h.png'
-)
+$WallpaperUrl = 'https://github.com/sejanyx/utils/blob/main/default.png?raw=true'
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$Version = '0.4.18-standalone'
+$Version = '0.4.20-standalone'
 $LocalUserName = 'nyx'
 $LocalUserPassword = 'nyxcloud'
 $ApolloDisplayName = 'nyxcloud'
@@ -513,6 +504,7 @@ function Configure-Apollo {
             upnp = 'disabled'
             headless_mode = 'enabled'
             dd_configuration_option = 'ensure_only_display'
+            dd_config_revert_on_disconnect = 'enabled'
             origin_web_ui_allowed = 'wan'
         }
         $remaining = @($existing | Where-Object {
@@ -666,9 +658,7 @@ $ErrorActionPreference = 'Stop'
 
 $expectedUser = 'nyx'
 if ($env:USERNAME -ine $expectedUser) { exit 0 }
-$wallpaperUrls = @(
-__WALLPAPER_URLS__
-)
+$wallpaperUrl = '__WALLPAPER_URL__'
 
 $programData = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
 if ([string]::IsNullOrWhiteSpace($programData)) { throw 'ProgramData indisponível.' }
@@ -707,9 +697,6 @@ try {
 using System;
 using System.Runtime.InteropServices;
 public static class NyxAppearance {
-    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    public static extern bool SystemParametersInfo(int action, int param, string value, int flags);
-
     [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     public static extern IntPtr SendMessageTimeout(
         IntPtr window, uint message, UIntPtr wParam, string lParam,
@@ -791,90 +778,37 @@ public static class NyxAppearance {
         if ([string]::IsNullOrWhiteSpace($userProfile)) { throw 'Perfil do usuário indisponível.' }
         $pictures = [IO.Path]::Combine($userProfile, 'Pictures')
     }
-    $wallpaperDir = [IO.Path]::Combine($pictures, 'Nyx Wallpapers')
-    New-Item -Path $wallpaperDir -ItemType Directory -Force | Out-Null
-    Write-UserLog "Diretório dos wallpapers: $wallpaperDir."
-
+    New-Item -Path $pictures -ItemType Directory -Force | Out-Null
+    $wallpaperPath = Join-Path $pictures 'default.png'
+    $temporaryFile = "$wallpaperPath.download"
+    Remove-Item -LiteralPath $temporaryFile -Force -ErrorAction SilentlyContinue
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-    Add-Type -AssemblyName System.Drawing
-    $downloadErrors = @()
-    foreach ($url in $wallpaperUrls) {
-        $temporaryFile = $null
-        try {
-            $uri = [Uri]$url
-            $fileName = [IO.Path]::GetFileName($uri.AbsolutePath)
-            $extension = [IO.Path]::GetExtension($fileName).ToLowerInvariant()
-            if ([string]::IsNullOrWhiteSpace($fileName) -or $extension -notin @('.png','.jpg','.jpeg','.bmp')) {
-                throw 'URL sem nome ou extensão de imagem válida'
-            }
-            $destination = Join-Path $wallpaperDir $fileName
-            $temporaryFile = "$destination.download"
-            Remove-Item -LiteralPath $temporaryFile -Force -ErrorAction SilentlyContinue
-            Invoke-WebRequest -Uri $url -OutFile $temporaryFile -UseBasicParsing -ErrorAction Stop
-            if ((Get-Item -LiteralPath $temporaryFile -ErrorAction Stop).Length -lt 1024) {
-                throw 'arquivo recebido é pequeno demais'
-            }
-            $downloadedImage = [Drawing.Image]::FromFile($temporaryFile)
-            try {
-                if ($downloadedImage.Width -lt 1 -or $downloadedImage.Height -lt 1) {
-                    throw 'arquivo recebido não possui dimensões válidas'
-                }
-            }
-            finally {
-                $downloadedImage.Dispose()
-            }
-            Move-Item -LiteralPath $temporaryFile -Destination $destination -Force
-            Write-UserLog "Wallpaper baixado: $fileName."
-        }
-        catch {
-            if ($temporaryFile) { Remove-Item -LiteralPath $temporaryFile -Force -ErrorAction SilentlyContinue }
-            $downloadErrors += "$url ($($_.Exception.Message))"
-            Write-UserLog "Falha ao baixar wallpaper $url : $($_.Exception.Message)"
-        }
-    }
-
-    $sourceWallpapers = @(Get-ChildItem -LiteralPath $wallpaperDir -File -ErrorAction Stop |
-        Where-Object { $_.Name -ne 'NyxCurrentWallpaper.bmp' -and $_.Extension.ToLowerInvariant() -in @('.png','.jpg','.jpeg','.bmp') })
-    if ($sourceWallpapers.Count -eq 0) {
-        throw "Nenhum wallpaper válido foi obtido em '$wallpaperDir'. Falhas: $($downloadErrors -join '; ')"
-    }
-
-    $selected = $sourceWallpapers | Get-Random
-    $userWallpaper = Join-Path $wallpaperDir 'NyxCurrentWallpaper.bmp'
-    Remove-Item -LiteralPath $userWallpaper -Force -ErrorAction SilentlyContinue
-    $sourceImage = [Drawing.Image]::FromFile($selected.FullName)
     try {
-        $sourceImage.Save($userWallpaper, [Drawing.Imaging.ImageFormat]::Bmp)
-    }
-    finally {
-        $sourceImage.Dispose()
-    }
-
-    $desktopKey = 'HKCU:\Control Panel\Desktop'
-    Set-ItemProperty -Path $desktopKey -Name Wallpaper -Value $userWallpaper
-    Set-ItemProperty -Path $desktopKey -Name WallpaperStyle -Value '10'
-    Set-ItemProperty -Path $desktopKey -Name TileWallpaper -Value '0'
-
-    $wallpaperApplied = $false
-    for ($attempt = 1; $attempt -le 3; $attempt++) {
-        if ([NyxAppearance]::SystemParametersInfo(20, 0, $userWallpaper, 3)) {
-            $configuredWallpaper = (Get-ItemProperty -Path $desktopKey -Name Wallpaper -ErrorAction Stop).Wallpaper
-            if ($configuredWallpaper -eq $userWallpaper) {
-                $wallpaperApplied = $true
-                break
+        Invoke-WebRequest -Uri $wallpaperUrl -OutFile $temporaryFile -UseBasicParsing -ErrorAction Stop
+        if ((Get-Item -LiteralPath $temporaryFile -ErrorAction Stop).Length -lt 1024) {
+            throw 'arquivo recebido é pequeno demais'
+        }
+        Add-Type -AssemblyName System.Drawing
+        $downloadedImage = [Drawing.Image]::FromFile($temporaryFile)
+        try {
+            if ($downloadedImage.Width -lt 1 -or $downloadedImage.Height -lt 1) {
+                throw 'arquivo recebido não possui dimensões válidas'
             }
         }
-        Start-Sleep -Seconds 3
+        finally {
+            $downloadedImage.Dispose()
+        }
+        Move-Item -LiteralPath $temporaryFile -Destination $wallpaperPath -Force
     }
-    if (-not $wallpaperApplied) {
-        throw 'O Windows não confirmou a aplicação do wallpaper.'
+    catch {
+        Remove-Item -LiteralPath $temporaryFile -Force -ErrorAction SilentlyContinue
+        throw "Não foi possível baixar o wallpaper para '$wallpaperPath': $($_.Exception.Message)"
     }
-    $wallpaperName = $selected.Name
-    Write-UserLog "Wallpaper aplicado a partir de $wallpaperName."
+    Write-UserLog "Wallpaper disponível para aplicação manual em $wallpaperPath."
 
     [ordered]@{
         status = 'READY'
-        wallpaper = $wallpaperName
+        wallpaper = $wallpaperPath
         configuredAt = (Get-Date).ToUniversalTime().ToString('o')
     } | ConvertTo-Json | Set-Content -LiteralPath $markerPath -Encoding UTF8
 
@@ -886,10 +820,7 @@ catch {
     exit 1
 }
 '@
-    $wallpaperUrlLiteral = ($WallpaperUrls | ForEach-Object {
-        "    '$($_.Replace("'", "''"))'"
-    }) -join ",`r`n"
-    $configScriptContent = $configScriptContent.Replace('__WALLPAPER_URLS__', $wallpaperUrlLiteral)
+    $configScriptContent = $configScriptContent.Replace('__WALLPAPER_URL__', $WallpaperUrl.Replace("'", "''"))
     $configScriptContent | Set-Content -LiteralPath $configScript -Encoding UTF8
 
 $createRestorePointLiteral = if ($CreateRestorePoint) { '$true' } else { '$false' }
