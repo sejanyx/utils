@@ -53,7 +53,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$Version = '0.4.20-standalone'
+$Version = '0.4.21-standalone'
 $LocalUserName = 'nyx'
 $LocalUserPassword = 'nyxcloud'
 $ApolloDisplayName = 'nyxcloud'
@@ -553,6 +553,47 @@ function Configure-Apollo {
     Write-NyxLog 'Apollo configurado como nyxcloud com credenciais nyx / nyxcloud.'
 }
 
+function Set-ParsecSingleDisplayPolicy {
+    $parsecKey = 'HKLM:\SOFTWARE\Parsec'
+    $managed = [ordered]@{
+        host_virtual_monitors = '0'
+        host_virtual_monitor_fallback = 'true'
+        host_privacy_mode = '0'
+    }
+
+    try {
+        if (-not (Test-Path -LiteralPath $parsecKey)) {
+            New-Item -Path $parsecKey -Force -ErrorAction Stop | Out-Null
+        }
+
+        $parsecProperties = Get-ItemProperty -LiteralPath $parsecKey -Name 'Configuration' -ErrorAction SilentlyContinue
+        $existing = if ($null -ne $parsecProperties) { [string]$parsecProperties.Configuration } else { '' }
+        $remaining = @(
+            foreach ($entry in @($existing -split ':')) {
+                $trimmed = $entry.Trim()
+                if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
+                $settingName = if ($trimmed -match '^\s*([^=]+)=') { $Matches[1].Trim() } else { '' }
+                if ($managed.Keys -notcontains $settingName) { $trimmed }
+            }
+        )
+        $managedEntries = @($managed.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" })
+        $configuration = (@($remaining) + $managedEntries) -join ':'
+
+        New-ItemProperty `
+            -LiteralPath $parsecKey `
+            -Name 'Configuration' `
+            -PropertyType String `
+            -Value $configuration `
+            -Force `
+            -ErrorAction Stop | Out-Null
+
+        Write-NyxLog 'Parsec preparado para usar zero monitores adicionais e somente um display virtual de fallback quando necessário.'
+    }
+    catch {
+        Write-NyxLog "A política local de tela única do Parsec não pôde ser preparada e será ignorada: $($_.Exception.Message)" 'WARN'
+    }
+}
+
 function Set-ApolloFirewallRule {
     $ruleName = 'Nyx-Apollo-Admin-Tailscale'
     Get-NetFirewallRule -Name $ruleName -ErrorAction SilentlyContinue |
@@ -1050,6 +1091,8 @@ try {
     Install-Applications
     Set-NyxState -Status 'SOFTWARE_INSTALLED'
 
+    Set-NyxCurrentStep 'política local de tela única do Parsec'
+    Set-ParsecSingleDisplayPolicy
     Set-NyxCurrentStep 'configuração do Apollo'
     Configure-Apollo
     Set-NyxCurrentStep 'regra de firewall do Apollo'
