@@ -53,7 +53,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$Version = '0.4.21-standalone'
+$Version = '0.4.22-standalone'
 $LocalUserName = 'nyx'
 $LocalUserPassword = 'nyxcloud'
 $ApolloDisplayName = 'nyxcloud'
@@ -502,9 +502,9 @@ function Configure-Apollo {
         $managed = [ordered]@{
             sunshine_name = $ApolloDisplayName
             upnp = 'disabled'
-            headless_mode = 'enabled'
-            dd_configuration_option = 'ensure_only_display'
-            dd_config_revert_on_disconnect = 'enabled'
+            headless_mode = 'disabled'
+            dd_configuration_option = 'disabled'
+            dd_config_revert_on_disconnect = 'disabled'
             origin_web_ui_allowed = 'wan'
         }
         $remaining = @($existing | Where-Object {
@@ -550,7 +550,7 @@ function Configure-Apollo {
             (Get-Service -Name $service.Name -ErrorAction Stop).WaitForStatus('Running', [TimeSpan]::FromSeconds(30))
         }
     }
-    Write-NyxLog 'Apollo configurado como nyxcloud com credenciais nyx / nyxcloud.'
+    Write-NyxLog 'Apollo configurado como nyxcloud com credenciais nyx / nyxcloud e captura do display principal existente.'
 }
 
 function Set-ParsecSingleDisplayPolicy {
