@@ -53,7 +53,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$Version = '0.4.22-standalone'
+$Version = '0.4.23-standalone'
 $LocalUserName = 'nyx'
 $LocalUserPassword = 'nyxcloud'
 $ApolloDisplayName = 'nyxcloud'
@@ -103,6 +103,8 @@ $ToolRoot = Join-NyxPath -Base $NyxRoot -Child 'Tools'
 $UserStateRoot = Join-NyxPath -Base $NyxRoot -Child 'UserState'
 $StatePath = Join-NyxPath -Base $NyxRoot -Child 'provisioning-state.json'
 $LogPath = Join-NyxPath -Base $LogRoot -Child 'provisioning.log'
+$NyxAssetRoot = 'C:\Nyx'
+$WallpaperPath = Join-NyxPath -Base $NyxAssetRoot -Child 'default.png'
 
 function Initialize-NyxDirectories {
     foreach ($path in @($NyxRoot, $LogRoot, $ToolRoot, $UserStateRoot)) {
@@ -133,6 +135,48 @@ function Write-NyxLog {
     $line = '{0:o} [{1}] {2}' -f (Get-Date), $Level, $Message
     Add-Content -LiteralPath $LogPath -Value $line -Encoding UTF8
     Write-Host $line
+}
+
+function Install-NyxWallpaperAsset {
+    New-Item -Path $NyxAssetRoot -ItemType Directory -Force -ErrorAction Stop | Out-Null
+    $temporaryFile = "$WallpaperPath.download"
+    Remove-Item -LiteralPath $temporaryFile -Force -ErrorAction SilentlyContinue
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+
+    $lastError = $null
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        try {
+            Invoke-WebRequest -Uri $WallpaperUrl -OutFile $temporaryFile -UseBasicParsing -ErrorAction Stop
+            if ((Get-Item -LiteralPath $temporaryFile -ErrorAction Stop).Length -lt 1024) {
+                throw 'O arquivo recebido é pequeno demais.'
+            }
+
+            Add-Type -AssemblyName System.Drawing
+            $downloadedImage = [Drawing.Image]::FromFile($temporaryFile)
+            try {
+                if ($downloadedImage.Width -lt 1 -or $downloadedImage.Height -lt 1) {
+                    throw 'O arquivo recebido não possui dimensões válidas.'
+                }
+            }
+            finally {
+                $downloadedImage.Dispose()
+            }
+
+            Move-Item -LiteralPath $temporaryFile -Destination $WallpaperPath -Force -ErrorAction Stop
+            Write-NyxLog "Wallpaper baixado e validado em $WallpaperPath."
+            return
+        }
+        catch {
+            $lastError = $_
+            Remove-Item -LiteralPath $temporaryFile -Force -ErrorAction SilentlyContinue
+            if ($attempt -lt 3) {
+                Write-NyxLog "Tentativa $attempt de baixar o wallpaper falhou; tentando novamente: $($_.Exception.Message)" 'WARN'
+                Start-Sleep -Seconds (2 * $attempt)
+            }
+        }
+    }
+
+    throw "Não foi possível instalar o wallpaper em '$WallpaperPath' após três tentativas: $($lastError.Exception.Message)"
 }
 
 function Set-NyxCurrentStep {
@@ -699,7 +743,7 @@ $ErrorActionPreference = 'Stop'
 
 $expectedUser = 'nyx'
 if ($env:USERNAME -ine $expectedUser) { exit 0 }
-$wallpaperUrl = '__WALLPAPER_URL__'
+$wallpaperPath = 'C:\Nyx\default.png'
 
 $programData = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
 if ([string]::IsNullOrWhiteSpace($programData)) { throw 'ProgramData indisponível.' }
@@ -813,37 +857,8 @@ public static class NyxAppearance {
     New-Item -Path $explorerPolicy -Force | Out-Null
     New-ItemProperty -Path $explorerPolicy -Name 'StartLayoutFile' -PropertyType String -Value $layoutPath -Force | Out-Null
 
-    $pictures = [Environment]::GetFolderPath([Environment+SpecialFolder]::MyPictures)
-    if ([string]::IsNullOrWhiteSpace($pictures)) {
-        $userProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
-        if ([string]::IsNullOrWhiteSpace($userProfile)) { throw 'Perfil do usuário indisponível.' }
-        $pictures = [IO.Path]::Combine($userProfile, 'Pictures')
-    }
-    New-Item -Path $pictures -ItemType Directory -Force | Out-Null
-    $wallpaperPath = Join-Path $pictures 'default.png'
-    $temporaryFile = "$wallpaperPath.download"
-    Remove-Item -LiteralPath $temporaryFile -Force -ErrorAction SilentlyContinue
-    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-    try {
-        Invoke-WebRequest -Uri $wallpaperUrl -OutFile $temporaryFile -UseBasicParsing -ErrorAction Stop
-        if ((Get-Item -LiteralPath $temporaryFile -ErrorAction Stop).Length -lt 1024) {
-            throw 'arquivo recebido é pequeno demais'
-        }
-        Add-Type -AssemblyName System.Drawing
-        $downloadedImage = [Drawing.Image]::FromFile($temporaryFile)
-        try {
-            if ($downloadedImage.Width -lt 1 -or $downloadedImage.Height -lt 1) {
-                throw 'arquivo recebido não possui dimensões válidas'
-            }
-        }
-        finally {
-            $downloadedImage.Dispose()
-        }
-        Move-Item -LiteralPath $temporaryFile -Destination $wallpaperPath -Force
-    }
-    catch {
-        Remove-Item -LiteralPath $temporaryFile -Force -ErrorAction SilentlyContinue
-        throw "Não foi possível baixar o wallpaper para '$wallpaperPath': $($_.Exception.Message)"
+    if (-not (Test-Path -LiteralPath $wallpaperPath -PathType Leaf)) {
+        throw "O wallpaper administrativo não foi encontrado em '$wallpaperPath'."
     }
     Write-UserLog "Wallpaper disponível para aplicação manual em $wallpaperPath."
 
@@ -861,7 +876,6 @@ catch {
     exit 1
 }
 '@
-    $configScriptContent = $configScriptContent.Replace('__WALLPAPER_URL__', $WallpaperUrl.Replace("'", "''"))
     $configScriptContent | Set-Content -LiteralPath $configScript -Encoding UTF8
 
 $createRestorePointLiteral = if ($CreateRestorePoint) { '$true' } else { '$false' }
@@ -1089,6 +1103,8 @@ try {
 
     Set-NyxCurrentStep 'instalação dos aplicativos'
     Install-Applications
+    Set-NyxCurrentStep 'instalação do wallpaper em C:\Nyx'
+    Install-NyxWallpaperAsset
     Set-NyxState -Status 'SOFTWARE_INSTALLED'
 
     Set-NyxCurrentStep 'política local de tela única do Parsec'
@@ -1121,7 +1137,7 @@ try {
     Write-Host 'Usuário local: nyx'
     Write-Host 'Senha: nyxcloud'
     if ($SkipRestart) {
-        Write-Host 'Reinicie a máquina manualmente para concluir o autologon e o wallpaper.'
+        Write-Host 'Reinicie a máquina manualmente para concluir o autologon e a personalização do perfil.'
     }
     try { Clear-NyxPowerShellHistory } catch { Write-NyxLog "Falha ao limpar o histórico do PowerShell: $($_.Exception.Message)" 'WARN' }
     exit 0
